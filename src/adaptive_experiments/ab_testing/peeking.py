@@ -3,6 +3,7 @@ Peeking simulation for A/B tests.
 
 Demonstrates false-positive inflation when a test is checked repeatedly and
 stopped early once p < alpha, even when there is no true effect (H0 is true).
+
 """
 
 from dataclasses import dataclass
@@ -39,7 +40,11 @@ def simulate_peeking(
     Under H0 (both groups have p_true), the test is peeked at n_looks equally
     spaced checkpoints and stopped as soon as p < alpha.  When n_looks == 1
     the false-positive rate should be approximately alpha.  As n_looks grows,
-    the false-positive rate inflates substantially above alpha.
+    the false-positive rate inflates substantially above alpha. 
+
+    Additional notes, because you're setting the actually likelihood of success
+    as equal for both control and treatment groups, there actually is no difference at 
+    all.
 
     Returns a summary with the empirical false-positive rate.
     """
