@@ -1,6 +1,12 @@
 """
 Run peeking simulation and print a summary showing false-positive rate inflation.
 
+Peeking simulations demonstrates the problem of relying on product teams to determine when
+to stop an experiment instead of following the pre-deermined stopping rules that are much better
+at guranteeing the significance of results. 
+
+In essence, a peeking simulation is a monte-carlo audit of a particular policy. 
+
 Usage:
     poetry run python scripts/run_peeking_simulation.py
 """
