@@ -34,15 +34,14 @@ regret constants than UCB1.
 
 ## Results
 
-<!-- TODO: paste table from run_bandit_comparison.py output here -->
-<!-- TODO: embed bandit_comparison_regret.png -->
-
 | Policy                | Total regret | Total reward | Best-arm share |
 |:----------------------|-------------:|-------------:|---------------:|
-| Random                | ?            | ?            | ~25%           |
-| EpsilonGreedy(ε=0.1)  | ?            | ?            | ?              |
-| UCB1                  | ?            | ?            | ?              |
-| Thompson              | ?            | ?            | ?              |
+| Random                | 301.4        | 398.6        | 23.3%          |
+| EpsilonGreedy(ε=0.1)  | 60.5         | 639.5        | 91.1%          |
+| UCB1                  | 59.5         | 640.5        | 83.4%          |
+| Thompson              | 16.7         | 683.3        | 94.9%          |
+
+![Cumulative regret comparison across policies](bandit_comparison_regret.png)
 
 ## Key Takeaways
 
@@ -51,6 +50,8 @@ regret constants than UCB1.
 2. Thompson sampling tends to have lower empirical regret than UCB1 on
    Bernoulli bandits because the Beta posterior is well-matched to the
    likelihood.
+   In this run, Thompson also achieved the best total regret, total reward,
+   and best-arm share among all compared policies.
 3. Best-arm allocation share is a useful proxy for how quickly each policy
    concentrates on the optimal arm.
 
