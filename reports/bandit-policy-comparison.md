@@ -54,6 +54,7 @@ regret constants than UCB1.
    and best-arm share among all compared policies.
 3. Best-arm allocation share is a useful proxy for how quickly each policy
    concentrates on the optimal arm.
+4. Thompson sampling is best here because we were able to select an appropriate model "Beta-bernoulli". The data generation process is bernoulli (0 or 1). The probability of success follow random beta distribution. Therefore, it has a beta prior and a bernoulli likelihood (a conjugate beta-bernoulli model). 
 
 ## References
 
