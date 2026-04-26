@@ -1,0 +1,424 @@
+---
+title: When Are Bandits Easy or Hard?
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: true
+execute:
+  freeze: auto
+  echo: true
+  warning: false
+  message: false
+jupyter: adaptive-experimentation
+---
+
+## Question: How does bandit difficulty change learning, regret, and convergence?
+
+**Core Setup:** Use two-arm Bernoulli environments and sweep the gap while keeping everything fixed.
+
+Example scenarios:
+
+- very easy: [0.20, 0.80]
+- medium: [0.40, 0.60]
+- hard: [0.45, 0.50]
+- very hard: [0.49, 0.50]
+
+**Policies to compare:**
+
+- random
+- epsilon-greedy with fixed epsilon
+- UCB1
+- Thompson sampling
+
+**Metrics to report:**
+
+- cumulative regret at horizon T
+- cumulative reward at horizon T
+- best-arm share over time
+- probability of ending up with the true best arm
+- variance across trials, not just the mean
+
+**What to plot:**
+
+- cumulative regret curves by scenario
+- best-arm allocation share over time
+- final regret as a function of gap Delta
+- probability of identifying the best arm at the end of the trial
+
+## My Prediction
+
+I predict that Thompson sampling will still outperform the other algorithms as the gap shrinks.
+
+## Experiment Setup
+
+```{python}
+#| label: setup
+from __future__ import annotations
+
+import sys
+from collections.abc import Callable
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+from IPython.display import Markdown, display
+
+
+def find_project_root(start: Path) -> Path:
+    for candidate in (start, *start.parents):
+        if (candidate / "pyproject.toml").exists() and (candidate / "src").exists():
+            return candidate
+    raise RuntimeError("Could not find the project root from the current working directory.")
+
+
+PROJECT_ROOT = find_project_root(Path.cwd())
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from adaptive_experiments.bandits.base import BanditPolicy
+from adaptive_experiments.bandits.epsilon_greedy import EpsilonGreedy
+from adaptive_experiments.bandits.thompson import ThompsonSampling
+from adaptive_experiments.bandits.ucb import UCB1
+from adaptive_experiments.metrics.regret import cumulative_regret
+from adaptive_experiments.metrics.reward import cumulative_reward
+from adaptive_experiments.simulation.environments import BernoulliEnvironment
+from adaptive_experiments.simulation.runners import run_trial
+
+
+class RandomPolicy(BanditPolicy):
+    """Uniform random baseline used for comparison."""
+
+    def __init__(self, n_arms: int, seed: int | None = None) -> None:
+        super().__init__(n_arms)
+        self._rng = np.random.default_rng(seed)
+
+    def select_arm(self) -> int:
+        return int(self._rng.integers(0, self.n_arms))
+
+
+SCENARIOS: dict[str, list[float]] = {
+    "Very easy": [0.20, 0.80],
+    "Medium": [0.40, 0.60],
+    "Hard": [0.45, 0.50],
+    "Very hard": [0.49, 0.50],
+}
+N_STEPS = 1_000
+N_TRIALS = 300
+EPSILON = 0.10
+BASE_SEED = 2026
+POLICY_FACTORIES: dict[str, Callable[[int, int], BanditPolicy]] = {
+    "Random": lambda n_arms, seed: RandomPolicy(n_arms, seed=seed),
+    "EpsilonGreedy(epsilon=0.1)": (
+        lambda n_arms, seed: EpsilonGreedy(n_arms, epsilon=EPSILON, seed=seed)
+    ),
+    "UCB1": lambda n_arms, seed: UCB1(n_arms),
+    "Thompson": lambda n_arms, seed: ThompsonSampling(n_arms, seed=seed),
+}
+POLICY_COLORS = {
+    "Random": "tab:blue",
+    "EpsilonGreedy(epsilon=0.1)": "tab:orange",
+    "UCB1": "tab:green",
+    "Thompson": "tab:red",
+}
+
+
+def best_arm_share_curve(arms: np.ndarray, best_arm: int) -> np.ndarray:
+    hits = (arms == best_arm).astype(float)
+    steps = np.arange(1, len(arms) + 1, dtype=float)
+    return np.cumsum(hits) / steps
+
+
+def render_markdown_table(rows: list[dict[str, object]], columns: list[tuple[str, str]]) -> None:
+    header = "| " + " | ".join(label for _, label in columns) + " |"
+    divider = "|" + "|".join(["---"] * len(columns)) + "|"
+    lines = [header, divider]
+    for row in rows:
+        values = [str(row[key]) for key, _ in columns]
+        lines.append("| " + " | ".join(values) + " |")
+    display(Markdown("\n".join(lines)))
+```
+
+## Run The Sweep
+
+```{python}
+#| label: run-gap-sweep
+scenario_results: dict[str, dict[str, object]] = {}
+summary_rows: list[dict[str, object]] = []
+
+for scenario_index, (scenario_name, probs) in enumerate(SCENARIOS.items()):
+    best_arm = int(np.argmax(probs))
+    gap = max(probs) - sorted(probs)[-2]
+    scenario_result: dict[str, object] = {
+        "probs": probs,
+        "gap": gap,
+        "best_arm": best_arm,
+        "policies": {},
+    }
+
+    for policy_index, (policy_name, factory) in enumerate(POLICY_FACTORIES.items()):
+        regret_curves: list[np.ndarray] = []
+        reward_curves: list[np.ndarray] = []
+        best_arm_share_curves: list[np.ndarray] = []
+        final_regrets: list[float] = []
+        final_rewards: list[float] = []
+        final_best_arm_shares: list[float] = []
+        identified_best_arm: list[float] = []
+
+        for trial_index in range(N_TRIALS):
+            env_seed = BASE_SEED + scenario_index * 10_000 + trial_index
+            policy_seed = BASE_SEED + policy_index * 10_000 + trial_index
+
+            env = BernoulliEnvironment.from_probs(probs, seed=env_seed)
+            policy = factory(env.n_arms, policy_seed)
+            records = run_trial(policy, env, N_STEPS)
+
+            arms = np.array([record.arm for record in records], dtype=int)
+            regret_curve = cumulative_regret(records)
+            reward_curve = cumulative_reward(records)
+            share_curve = best_arm_share_curve(arms, best_arm)
+            estimated_best_arm = int(np.argmax(policy.values))
+
+            regret_curves.append(regret_curve)
+            reward_curves.append(reward_curve)
+            best_arm_share_curves.append(share_curve)
+            final_regrets.append(float(regret_curve[-1]))
+            final_rewards.append(float(reward_curve[-1]))
+            final_best_arm_shares.append(float(share_curve[-1]))
+            identified_best_arm.append(float(estimated_best_arm == best_arm))
+
+        regret_array = np.vstack(regret_curves)
+        reward_array = np.vstack(reward_curves)
+        share_array = np.vstack(best_arm_share_curves)
+        final_regret_array = np.array(final_regrets, dtype=float)
+        final_reward_array = np.array(final_rewards, dtype=float)
+        final_share_array = np.array(final_best_arm_shares, dtype=float)
+        identified_best_array = np.array(identified_best_arm, dtype=float)
+
+        scenario_result["policies"][policy_name] = {
+            "regret_curves": regret_array,
+            "reward_curves": reward_array,
+            "share_curves": share_array,
+            "final_regrets": final_regret_array,
+            "final_rewards": final_reward_array,
+            "final_shares": final_share_array,
+            "identified_best": identified_best_array,
+            "mean_regret": regret_array.mean(axis=0),
+            "regret_p10": np.quantile(regret_array, 0.10, axis=0),
+            "regret_p90": np.quantile(regret_array, 0.90, axis=0),
+            "mean_reward": reward_array.mean(axis=0),
+            "reward_p10": np.quantile(reward_array, 0.10, axis=0),
+            "reward_p90": np.quantile(reward_array, 0.90, axis=0),
+            "mean_share": share_array.mean(axis=0),
+            "share_p10": np.quantile(share_array, 0.10, axis=0),
+            "share_p90": np.quantile(share_array, 0.90, axis=0),
+            "mean_final_regret": float(final_regret_array.mean()),
+            "std_final_regret": float(final_regret_array.std(ddof=1)),
+            "mean_final_reward": float(final_reward_array.mean()),
+            "std_final_reward": float(final_reward_array.std(ddof=1)),
+            "mean_final_share": float(final_share_array.mean()),
+            "best_arm_identification_rate": float(identified_best_array.mean()),
+        }
+
+        summary_rows.append(
+            {
+                "Scenario": scenario_name,
+                "Gap": f"{gap:.2f}",
+                "Policy": policy_name,
+                "Final regret": (
+                    f"{final_regret_array.mean():.1f} +/- {final_regret_array.std(ddof=1):.1f}"
+                ),
+                "Final reward": (
+                    f"{final_reward_array.mean():.1f} +/- {final_reward_array.std(ddof=1):.1f}"
+                ),
+                "Best-arm share": f"{final_share_array.mean():.1%}",
+                "Identify best": f"{identified_best_array.mean():.1%}",
+            }
+        )
+
+    scenario_results[scenario_name] = scenario_result
+
+print(
+    f"Ran {len(SCENARIOS)} scenarios x {len(POLICY_FACTORIES)} policies x "
+    f"{N_TRIALS} trials x {N_STEPS} steps."
+)
+```
+
+## Summary Metrics
+
+```{python}
+#| label: summary-table
+summary_columns = [
+    ("Scenario", "Scenario"),
+    ("Gap", "Gap"),
+    ("Policy", "Policy"),
+    ("Final regret", "Mean final regret +/- sd"),
+    ("Final reward", "Mean final reward +/- sd"),
+    ("Best-arm share", "Mean best-arm share"),
+    ("Identify best", "P(identify best arm)"),
+]
+render_markdown_table(summary_rows, summary_columns)
+```
+
+## Best Policy By Scenario
+
+```{python}
+#| label: scenario-winners
+winners_rows: list[dict[str, object]] = []
+
+for scenario_name, scenario_result in scenario_results.items():
+    policy_results = scenario_result["policies"]
+    best_regret_policy, best_regret_metrics = min(
+        policy_results.items(), key=lambda item: item[1]["mean_final_regret"]
+    )
+    best_identification_policy, best_identification_metrics = max(
+        policy_results.items(), key=lambda item: item[1]["best_arm_identification_rate"]
+    )
+    winners_rows.append(
+        {
+            "Scenario": scenario_name,
+            "Gap": f"{scenario_result['gap']:.2f}",
+            "Lowest regret": (
+                f"{best_regret_policy} ({best_regret_metrics['mean_final_regret']:.1f})"
+            ),
+            "Best identification": (
+                f"{best_identification_policy} "
+                f"({best_identification_metrics['best_arm_identification_rate']:.1%})"
+            ),
+        }
+    )
+
+winners_columns = [
+    ("Scenario", "Scenario"),
+    ("Gap", "Gap"),
+    ("Lowest regret", "Lowest mean final regret"),
+    ("Best identification", "Highest best-arm identification rate"),
+]
+render_markdown_table(winners_rows, winners_columns)
+```
+
+## Figure 1: Cumulative Regret By Scenario
+
+```{python}
+#| label: fig-cumulative-regret-by-scenario
+#| fig-cap: Mean cumulative regret across trials for each scenario. The shaded bands show the 10th to 90th percentile range across trials, which makes the growing uncertainty under smaller arm gaps easy to see.
+fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
+steps = np.arange(1, N_STEPS + 1)
+
+for ax, (scenario_name, scenario_result) in zip(axes.ravel(), scenario_results.items()):
+    for policy_name, policy_result in scenario_result["policies"].items():
+        color = POLICY_COLORS[policy_name]
+        ax.plot(steps, policy_result["mean_regret"], label=policy_name, color=color)
+        ax.fill_between(
+            steps,
+            policy_result["regret_p10"],
+            policy_result["regret_p90"],
+            color=color,
+            alpha=0.12,
+        )
+    ax.set_title(f"{scenario_name} (gap={scenario_result['gap']:.2f})")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Cumulative regret")
+    ax.grid(alpha=0.25)
+
+handles, labels = axes[0, 0].get_legend_handles_labels()
+fig.legend(handles, labels, loc="upper center", ncol=2, frameon=False)
+fig.tight_layout(rect=(0, 0, 1, 0.95))
+plt.show()
+```
+
+## Figure 2: Best-Arm Allocation Share Over Time
+
+```{python}
+#| label: fig-best-arm-share-by-scenario
+#| fig-cap: Average share of pulls allocated to the true best arm over time. Higher curves indicate faster concentration on the optimal arm, while flatter curves indicate that the policy keeps spending more traffic on suboptimal arms.
+fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True, sharey=True)
+
+for ax, (scenario_name, scenario_result) in zip(axes.ravel(), scenario_results.items()):
+    for policy_name, policy_result in scenario_result["policies"].items():
+        color = POLICY_COLORS[policy_name]
+        ax.plot(steps, policy_result["mean_share"], label=policy_name, color=color)
+        ax.fill_between(
+            steps,
+            policy_result["share_p10"],
+            policy_result["share_p90"],
+            color=color,
+            alpha=0.12,
+        )
+    ax.set_title(f"{scenario_name} (gap={scenario_result['gap']:.2f})")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Best-arm share")
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(alpha=0.25)
+
+handles, labels = axes[0, 0].get_legend_handles_labels()
+fig.legend(handles, labels, loc="upper center", ncol=2, frameon=False)
+fig.tight_layout(rect=(0, 0, 1, 0.95))
+plt.show()
+```
+
+## Figure 3: Final Regret Versus Gap
+
+```{python}
+#| label: fig-final-regret-vs-gap
+#| fig-cap: Mean final regret as a function of the arm gap. Error bars show one standard deviation across trials, highlighting both average performance and run-to-run variability.
+fig, ax = plt.subplots(figsize=(8, 5))
+sorted_scenarios = sorted(scenario_results.items(), key=lambda item: item[1]["gap"])
+gaps = np.array([scenario_result["gap"] for _, scenario_result in sorted_scenarios])
+
+for policy_name in POLICY_FACTORIES:
+    means = []
+    stds = []
+    for _, scenario_result in sorted_scenarios:
+        policy_result = scenario_result["policies"][policy_name]
+        means.append(policy_result["mean_final_regret"])
+        stds.append(policy_result["std_final_regret"])
+    ax.errorbar(
+        gaps,
+        means,
+        yerr=stds,
+        marker="o",
+        capsize=4,
+        linewidth=2,
+        label=policy_name,
+        color=POLICY_COLORS[policy_name],
+    )
+
+ax.set_xlabel("Gap between best and second-best arm")
+ax.set_ylabel("Final cumulative regret")
+ax.set_title("Final regret grows as the arm gap shrinks")
+ax.grid(alpha=0.25)
+ax.legend(frameon=False)
+plt.show()
+```
+
+## Figure 4: Probability Of Identifying The Best Arm
+
+```{python}
+#| label: fig-identify-best-arm-vs-gap
+#| fig-cap: Probability that each policy finishes a trial with the true best arm as its highest estimated-value arm. This is a direct way to visualize how often each policy ends in the correct belief state.
+fig, ax = plt.subplots(figsize=(8, 5))
+
+for policy_name in POLICY_FACTORIES:
+    identification_rates = []
+    for _, scenario_result in sorted_scenarios:
+        policy_result = scenario_result["policies"][policy_name]
+        identification_rates.append(policy_result["best_arm_identification_rate"])
+    ax.plot(
+        gaps,
+        identification_rates,
+        marker="o",
+        linewidth=2,
+        label=policy_name,
+        color=POLICY_COLORS[policy_name],
+    )
+
+ax.set_xlabel("Gap between best and second-best arm")
+ax.set_ylabel("Probability of identifying the best arm")
+ax.set_ylim(0.0, 1.05)
+ax.set_title("Correct best-arm identification becomes harder as the gap shrinks")
+ax.grid(alpha=0.25)
+ax.legend(frameon=False)
+plt.show()
+```
