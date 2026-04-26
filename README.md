@@ -143,6 +143,38 @@ poetry run python scripts/run_peeking_simulation.py
 poetry run python scripts/run_bandit_comparison.py
 ```
 
+## Quarto preview
+
+For this repo, Quarto needs to execute notebooks with the project virtual environment.
+
+If you use `direnv`, the repo now includes a tracked `.envrc` that exports:
+
+```bash
+QUARTO_PYTHON="$PWD/.venv/bin/python"
+```
+
+One-time setup on your machine:
+
+```bash
+brew install direnv
+echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc
+source ~/.zshrc
+cd /Users/et/Desktop/Data_Projects/adaptive-experimentation
+direnv allow
+```
+
+After that, plain Quarto commands work inside this repo:
+
+```bash
+quarto preview experiments/what_happens_at_different_difficulty.qmd --to html --no-browser --no-watch-inputs
+```
+
+If you do not want to install `direnv`, use Poetry directly:
+
+```bash
+poetry run quarto preview experiments/what_happens_at_different_difficulty.qmd --to html --no-browser --no-watch-inputs
+```
+
 ---
 
 ## Interview-ready framing

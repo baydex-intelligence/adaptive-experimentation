@@ -10,7 +10,6 @@ execute:
   echo: true
   warning: false
   message: false
-jupyter: adaptive-experimentation
 ---
 
 ## Question: How does bandit difficulty change learning, regret, and convergence?
@@ -303,7 +302,7 @@ render_markdown_table(winners_rows, winners_columns)
 ```{python}
 #| label: fig-cumulative-regret-by-scenario
 #| fig-cap: Mean cumulative regret across trials for each scenario. The shaded bands show the 10th to 90th percentile range across trials, which makes the growing uncertainty under smaller arm gaps easy to see.
-fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
+fig, axes = plt.subplots(2, 2, figsize=(10, 6), sharex=True)
 steps = np.arange(1, N_STEPS + 1)
 
 for ax, (scenario_name, scenario_result) in zip(axes.ravel(), scenario_results.items()):
@@ -333,7 +332,7 @@ plt.show()
 ```{python}
 #| label: fig-best-arm-share-by-scenario
 #| fig-cap: Average share of pulls allocated to the true best arm over time. Higher curves indicate faster concentration on the optimal arm, while flatter curves indicate that the policy keeps spending more traffic on suboptimal arms.
-fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True, sharey=True)
+fig, axes = plt.subplots(2, 2, figsize=(10, 6), sharex=True, sharey=True)
 
 for ax, (scenario_name, scenario_result) in zip(axes.ravel(), scenario_results.items()):
     for policy_name, policy_result in scenario_result["policies"].items():
@@ -363,7 +362,7 @@ plt.show()
 ```{python}
 #| label: fig-final-regret-vs-gap
 #| fig-cap: Mean final regret as a function of the arm gap. Error bars show one standard deviation across trials, highlighting both average performance and run-to-run variability.
-fig, ax = plt.subplots(figsize=(8, 5))
+fig, ax = plt.subplots(figsize=(6, 3))
 sorted_scenarios = sorted(scenario_results.items(), key=lambda item: item[1]["gap"])
 gaps = np.array([scenario_result["gap"] for _, scenario_result in sorted_scenarios])
 
@@ -398,7 +397,7 @@ plt.show()
 ```{python}
 #| label: fig-identify-best-arm-vs-gap
 #| fig-cap: Probability that each policy finishes a trial with the true best arm as its highest estimated-value arm. This is a direct way to visualize how often each policy ends in the correct belief state.
-fig, ax = plt.subplots(figsize=(8, 5))
+fig, ax = plt.subplots(figsize=(6, 3))
 
 for policy_name in POLICY_FACTORIES:
     identification_rates = []
