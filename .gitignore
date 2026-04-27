@@ -209,4 +209,7 @@ __marimo__/
 
 # Quarto rendered experiment outputs
 experiments/*.html
+experiments/*.pdf
 experiments/*_files/
+experiments/.quarto
+experiments/*.quarto_ipynb*

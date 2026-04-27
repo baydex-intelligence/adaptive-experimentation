@@ -21,6 +21,7 @@ class StepRecord:
     arm: int
     reward: int
     best_p: float
+    chosen_p: float
 
 
 def run_trial(
@@ -41,7 +42,10 @@ def run_trial(
         arm = policy.select_arm()
         reward = env.pull(arm)
         policy.update(arm, reward)
-        records.append(StepRecord(t=t, arm=arm, reward=reward, best_p=env.best_p))
+        chosen_p = env.arms[arm].p
+        records.append(
+            StepRecord(t=t, arm=arm, reward=reward, best_p=env.best_p, chosen_p=chosen_p)
+        )
     return records
 
 
@@ -71,11 +75,23 @@ def average_cumulative_reward(trials: list[list[StepRecord]]) -> np.ndarray:
     return rewards.cumsum(axis=1).mean(axis=0)
 
 
-def average_cumulative_regret(trials: list[list[StepRecord]]) -> np.ndarray:
+def average_cumulative_pseudo_regret(trials: list[list[StepRecord]]) -> np.ndarray:
     """
-    Mean cumulative regret across trials, shape (n_steps,).
+    Mean cumulative pseudo-regret across trials, shape (n_steps,).
 
-    Regret at step t = best_p - reward_t.
+    Pseudo-regret at step t = best_p - chosen_p_t.
+    """
+    regrets = np.array(
+        [[r.best_p - r.chosen_p for r in trial] for trial in trials], dtype=float
+    )
+    return regrets.cumsum(axis=1).mean(axis=0)
+
+
+def average_cumulative_realized_regret(trials: list[list[StepRecord]]) -> np.ndarray:
+    """
+    Mean cumulative realized regret across trials, shape (n_steps,).
+
+    Realized regret at step t = best_p - reward_t.
     """
     regrets = np.array(
         [[r.best_p - r.reward for r in trial] for trial in trials], dtype=float

@@ -1128,6 +1128,18 @@ MarkupSafe = ">=2.0"
 i18n = ["Babel (>=2.7)"]
 
 [[package]]
+name = "joblib"
+version = "1.5.3"
+description = "Lightweight pipelining with Python functions"
+optional = false
+python-versions = ">=3.9"
+groups = ["dev"]
+files = [
+    {file = "joblib-1.5.3-py3-none-any.whl", hash = "sha256:5fc3c5039fc5ca8c0276333a188bbd59d6b7ab37fe6632daa76bc7f9ec18e713"},
+    {file = "joblib-1.5.3.tar.gz", hash = "sha256:8561a3269e6801106863fd0d6d84bb737be9e7631e33aaed3fb9ce5953688da3"},
+]
+
+[[package]]
 name = "json5"
 version = "0.14.0"
 description = "A Python implementation of the JSON5 data format."
@@ -3325,4 +3337,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = "3.13.12"
-content-hash = "e5a78993db6b68f23a1d9f2498927bc35055af1976d54a79e09ef6db529f3eb5"
+content-hash = "70ee1f0c1a22b1086c134a259656ab95a725dde22d04c26c88fe938207e04489"

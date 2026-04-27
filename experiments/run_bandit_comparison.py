@@ -17,13 +17,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from adaptive_experiments.bandits.base import BanditPolicy
-from adaptive_experiments.bandits.epsilon_greedy import EpsilonGreedy
+from adaptive_experiments.bandits.decaying_epsilon import DecayingEpsilon
 from adaptive_experiments.bandits.ucb import UCB1
 from adaptive_experiments.bandits.thompson import ThompsonSampling
 from adaptive_experiments.simulation.environments import BernoulliEnvironment
 from adaptive_experiments.simulation.runners import (
     run_repeated_trials,
-    average_cumulative_regret,
+    average_cumulative_pseudo_regret,
     average_cumulative_reward,
 )
 from adaptive_experiments.metrics.allocation import allocation_shares
@@ -54,7 +54,13 @@ def main() -> None:
 
     policies: dict[str, BanditPolicy] = {
         "Random": RandomPolicy(n_arms, seed=SEED),
-        "EpsilonGreedy(ε=0.1)": EpsilonGreedy(n_arms, epsilon=0.1, seed=SEED),
+        "DecayingEpsilon": DecayingEpsilon(
+            n_arms,
+            initial_epsilon=0.2,
+            min_epsilon=0.01,
+            decay_rate=0.01,
+            seed=SEED,
+        ),
         "UCB1": UCB1(n_arms),
         "Thompson": ThompsonSampling(n_arms, seed=SEED),
     }
@@ -68,7 +74,7 @@ def main() -> None:
 
     for name, policy in policies.items():
         trials = run_repeated_trials(policy, env, N_STEPS, N_TRIALS)
-        avg_regret = average_cumulative_regret(trials)
+        avg_regret = average_cumulative_pseudo_regret(trials)
         avg_reward = average_cumulative_reward(trials)
         regret_curves[name] = avg_regret
 
@@ -82,7 +88,9 @@ def main() -> None:
         )
 
     # Plot.
-    ax = plot_cumulative_regret(regret_curves, title="Bandit Comparison — Cumulative Regret")
+    ax = plot_cumulative_regret(
+        regret_curves, title="Bandit Comparison — Cumulative Pseudo-Regret"
+    )
     ax.figure.tight_layout()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_path = OUTPUT_DIR / "bandit_comparison_regret.png"

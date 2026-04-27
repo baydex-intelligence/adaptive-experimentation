@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from adaptive_experiments.bandits.epsilon_greedy import EpsilonGreedy
+from adaptive_experiments.bandits.decaying_epsilon import DecayingEpsilon
 from adaptive_experiments.bandits.thompson import ThompsonSampling
 from adaptive_experiments.bandits.ucb import UCB1
 from adaptive_experiments.simulation.environments import BernoulliEnvironment
@@ -11,9 +11,13 @@ from adaptive_experiments.simulation.runners import (
     run_trial,
     run_repeated_trials,
     average_cumulative_reward,
-    average_cumulative_regret,
+    average_cumulative_pseudo_regret,
+    average_cumulative_realized_regret,
 )
-from adaptive_experiments.metrics.regret import cumulative_regret, final_regret
+from adaptive_experiments.metrics.regret import (
+    cumulative_pseudo_regret,
+    cumulative_realized_regret,
+)
 from adaptive_experiments.metrics.reward import cumulative_reward, total_reward
 from adaptive_experiments.metrics.allocation import allocation_shares
 
@@ -29,7 +33,13 @@ def env():
 
 @pytest.fixture
 def policy(env):
-    return EpsilonGreedy(n_arms=env.n_arms, epsilon=0.1, seed=1)
+    return DecayingEpsilon(
+        n_arms=env.n_arms,
+        initial_epsilon=0.2,
+        min_epsilon=0.01,
+        decay_rate=0.01,
+        seed=1,
+    )
 
 
 class TestRunTrial:
@@ -53,6 +63,10 @@ class TestRunTrial:
         records = run_trial(policy, env, N_STEPS)
         assert all(r.best_p == env.best_p for r in records)
 
+    def test_chosen_p_matches_selected_arm(self, env, policy):
+        records = run_trial(policy, env, N_STEPS)
+        assert all(r.chosen_p == env.arms[r.arm].p for r in records)
+
 
 class TestRunRepeatedTrials:
     def test_correct_number_of_trials(self, env, policy):
@@ -61,7 +75,13 @@ class TestRunRepeatedTrials:
 
     def test_policy_is_reset_between_trials(self, env):
         """Counts should start from zero at the beginning of each trial."""
-        policy = EpsilonGreedy(n_arms=2, epsilon=0.0, seed=0)
+        policy = DecayingEpsilon(
+            n_arms=2,
+            initial_epsilon=0.0,
+            min_epsilon=0.0,
+            decay_rate=0.01,
+            seed=0,
+        )
         trials = run_repeated_trials(policy, env, N_STEPS, n_trials=3)
         # Policy should have been reset and re-run; all trials have N_STEPS records.
         for trial in trials:
@@ -74,9 +94,14 @@ class TestAverageMetrics:
         avg = average_cumulative_reward(trials)
         assert avg.shape == (N_STEPS,)
 
-    def test_avg_cumulative_regret_shape(self, env, policy):
+    def test_avg_cumulative_pseudo_regret_shape(self, env, policy):
         trials = run_repeated_trials(policy, env, N_STEPS, n_trials=10)
-        avg = average_cumulative_regret(trials)
+        avg = average_cumulative_pseudo_regret(trials)
+        assert avg.shape == (N_STEPS,)
+
+    def test_avg_cumulative_realized_regret_shape(self, env, policy):
+        trials = run_repeated_trials(policy, env, N_STEPS, n_trials=10)
+        avg = average_cumulative_realized_regret(trials)
         assert avg.shape == (N_STEPS,)
 
     def test_avg_cumulative_reward_is_non_decreasing(self, env, policy):
@@ -84,18 +109,26 @@ class TestAverageMetrics:
         avg = average_cumulative_reward(trials)
         assert np.all(np.diff(avg) >= 0)
 
-    def test_avg_cumulative_regret_non_negative(self, env, policy):
+    def test_avg_cumulative_pseudo_regret_non_negative(self, env, policy):
         trials = run_repeated_trials(policy, env, N_STEPS, n_trials=10)
-        avg = average_cumulative_regret(trials)
-        # Regret can be slightly negative per step when reward > best_p,
-        # but cumulative should be near-zero or positive overall.
-        assert avg[-1] >= -5  # generous tolerance
+        avg = average_cumulative_pseudo_regret(trials)
+        assert avg[-1] >= 0
+
+    def test_avg_cumulative_realized_regret_is_finite(self, env, policy):
+        trials = run_repeated_trials(policy, env, N_STEPS, n_trials=10)
+        avg = average_cumulative_realized_regret(trials)
+        assert np.isfinite(avg[-1])
 
 
 class TestMetrics:
-    def test_cumulative_regret_length(self, env, policy):
+    def test_cumulative_pseudo_regret_length(self, env, policy):
         records = run_trial(policy, env, N_STEPS)
-        r = cumulative_regret(records)
+        r = cumulative_pseudo_regret(records)
+        assert len(r) == N_STEPS
+
+    def test_cumulative_realized_regret_length(self, env, policy):
+        records = run_trial(policy, env, N_STEPS)
+        r = cumulative_realized_regret(records)
         assert len(r) == N_STEPS
 
     def test_cumulative_reward_length(self, env, policy):
@@ -142,7 +175,7 @@ class TestBestArmConvergence:
         ts_trials = run_repeated_trials(ts, env, n_steps, n_trials)
         rp_trials = run_repeated_trials(rp, env, n_steps, n_trials)
 
-        ts_regret = average_cumulative_regret(ts_trials)[-1]
-        rp_regret = average_cumulative_regret(rp_trials)[-1]
+        ts_regret = average_cumulative_pseudo_regret(ts_trials)[-1]
+        rp_regret = average_cumulative_pseudo_regret(rp_trials)[-1]
 
         assert ts_regret < rp_regret

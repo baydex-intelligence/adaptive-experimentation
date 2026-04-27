@@ -13,20 +13,21 @@ import numpy as np
 
 def plot_cumulative_regret(
     curves: dict[str, np.ndarray],
-    title: str = "Cumulative Regret",
+    title: str = "Cumulative Pseudo-Regret",
     ax: plt.Axes | None = None,
 ) -> plt.Axes:
     """
     Plot one or more cumulative regret curves on the same axes.
 
-    curves: mapping of policy label -> array of shape (n_steps,).
+    By convention this helper is used for pseudo-regret curves unless a caller
+    explicitly provides a different title.
     """
     if ax is None:
         _, ax = plt.subplots()
     for label, curve in curves.items():
         ax.plot(curve, label=label)
     ax.set_xlabel("Step")
-    ax.set_ylabel("Cumulative regret")
+    ax.set_ylabel("Cumulative pseudo-regret")
     ax.set_title(title)
     ax.legend()
     return ax
