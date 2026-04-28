@@ -1,0 +1,704 @@
+---
+title: Which Policies Look Good Early Versus Late?
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: true
+execute:
+  freeze: auto
+  echo: true
+  warning: false
+  message: false
+  keep-ipynb: false
+---
+
+## Question: which policies look good early versus late?
+
+**Core Setup:** Use fixed Bernoulli bandit environments and sweep the time horizon while keeping the arm probabilities fixed.
+
+Example scenarios:
+
+- very short: T = 50
+- short: T = 100
+- medium: T = 250
+- long: T = 500
+- very long: T = 1,000
+- extra long: T = 2,000
+
+Use one easy environment and one hard environment so the horizon effect is not confused with problem difficulty.
+
+Suggested environments:
+
+- easier gap: [0.30, 0.70]
+- harder gap: [0.45, 0.50]
+
+**Policies to compare:**
+
+- random
+- decaying epsilon-greedy
+- UCB1
+- Thompson sampling
+
+**Metrics to report:**
+
+- cumulative pseudo-regret at horizon T
+- cumulative reward at horizon T
+- best-arm share at horizon T
+- early-stage regret and reward at shared checkpoints
+- probability that the final estimated-best arm is truly optimal
+- variance across trials, not just the mean
+
+**What to plot:**
+
+- cumulative pseudo-regret curves by policy
+- cumulative reward curves by policy
+- final pseudo-regret as a function of horizon
+- final best-arm identification rate as a function of horizon
+- policy ranking at early checkpoints versus final horizon
+
+## My Prediction
+
+I predict that simpler exploitative policies will sometimes look competitive at short horizons because they pay less upfront exploration cost, but Thompson sampling and UCB1 will separate from them as the horizon grows because they recover that exploration cost through better long-run allocation.
+
+I also predict that the “winner” will depend on whether I care about early reward, final regret, or final identification. A policy can look good early and still be the wrong long-run choice. (This was actually acciently modified by openclaw-Jessica. My prediction was that TS would still be mostly better for cost savings.)
+
+## Experiment Setup
+
+```{python}
+#| label: setup
+from __future__ import annotations
+
+import sys
+from collections.abc import Callable
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+from IPython.display import Markdown, display
+from joblib import Parallel, delayed
+
+
+def find_project_root(start: Path) -> Path:
+    for candidate in (start, *start.parents):
+        if (candidate / "pyproject.toml").exists() and (candidate / "src").exists():
+            return candidate
+    raise RuntimeError("Could not find the project root from the current working directory.")
+
+
+PROJECT_ROOT = find_project_root(Path.cwd())
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from adaptive_experiments.bandits.base import BanditPolicy
+from adaptive_experiments.bandits.decaying_epsilon import DecayingEpsilon
+from adaptive_experiments.bandits.thompson import ThompsonSampling
+from adaptive_experiments.bandits.ucb import UCB1
+from adaptive_experiments.metrics.regret import cumulative_pseudo_regret
+from adaptive_experiments.metrics.reward import cumulative_reward
+from adaptive_experiments.simulation.environments import BernoulliEnvironment
+from adaptive_experiments.simulation.runners import run_trial
+
+
+class RandomPolicy(BanditPolicy):
+    """Uniform random baseline used for comparison."""
+
+    def __init__(self, n_arms: int, seed: int | None = None) -> None:
+        super().__init__(n_arms)
+        self._rng = np.random.default_rng(seed)
+
+    def select_arm(self) -> int:
+        return int(self._rng.integers(0, self.n_arms))
+
+
+def make_random_policy(n_arms: int, seed: int) -> BanditPolicy:
+    return RandomPolicy(n_arms, seed=seed)
+
+
+def make_decaying_epsilon_policy(n_arms: int, seed: int) -> BanditPolicy:
+    return DecayingEpsilon(
+        n_arms,
+        initial_epsilon=INITIAL_EPSILON,
+        min_epsilon=MIN_EPSILON,
+        decay_rate=DECAY_RATE,
+        seed=seed,
+    )
+
+
+def make_ucb1_policy(n_arms: int, seed: int) -> BanditPolicy:
+    del seed
+    return UCB1(n_arms)
+
+
+def make_thompson_policy(n_arms: int, seed: int) -> BanditPolicy:
+    return ThompsonSampling(n_arms, seed=seed)
+
+
+ENVIRONMENTS: dict[str, list[float]] = {
+    "Easier gap": [0.30, 0.70],
+    "Harder gap": [0.45, 0.50],
+}
+HORIZONS: dict[str, int] = {
+    "Very short": 50,
+    "Short": 100,
+    "Medium": 250,
+    "Long": 500,
+    "Very long": 1_000,
+    "Extra long": 2_000,
+}
+CHECKPOINT_FRACTIONS = (0.10, 0.25, 0.50, 1.00)
+N_TRIALS = 500
+Z_VALUE = 1.96
+INITIAL_EPSILON = 0.20
+MIN_EPSILON = 0.01
+DECAY_RATE = 0.01
+BASE_SEED = 2026
+JOBLIB_N_JOBS = -1
+POLICY_FACTORIES: dict[str, Callable[[int, int], BanditPolicy]] = {
+    "Random": make_random_policy,
+    "DecayingEpsilon": make_decaying_epsilon_policy,
+    "UCB1": make_ucb1_policy,
+    "Thompson": make_thompson_policy,
+}
+POLICY_COLORS = {
+    "Random": "tab:blue",
+    "DecayingEpsilon": "tab:orange",
+    "UCB1": "tab:green",
+    "Thompson": "tab:red",
+}
+PLOT_POLICIES_NO_RANDOM = [
+    policy_name for policy_name in POLICY_FACTORIES if policy_name != "Random"
+]
+
+
+def checkpoint_steps(horizon: int) -> dict[str, int]:
+    checkpoints: dict[str, int] = {}
+    for fraction in CHECKPOINT_FRACTIONS:
+        step = max(1, int(round(horizon * fraction)))
+        checkpoints[f"{int(fraction * 100)}%"] = min(step, horizon)
+    return checkpoints
+
+
+def best_arm_share_curve(arms: np.ndarray, best_arm: int) -> np.ndarray:
+    hits = (arms == best_arm).astype(float)
+    steps = np.arange(1, len(arms) + 1, dtype=float)
+    return np.cumsum(hits) / steps
+
+
+def mean_confidence_interval(values: np.ndarray, z_value: float = Z_VALUE) -> tuple[float, float]:
+    mean = float(values.mean())
+    if len(values) < 2:
+        return mean, mean
+    margin = z_value * float(values.std(ddof=1)) / np.sqrt(len(values))
+    return mean - margin, mean + margin
+
+
+def run_single_trial(
+    probs: list[float],
+    horizon: int,
+    best_arm: int,
+    policy_factory: Callable[[int, int], BanditPolicy],
+    environment_index: int,
+    horizon_index: int,
+    policy_index: int,
+    trial_index: int,
+) -> dict[str, np.ndarray | float | dict[str, float]]:
+    env_seed = BASE_SEED + environment_index * 100_000 + horizon_index * 10_000 + trial_index
+    policy_seed = BASE_SEED + policy_index * 100_000 + horizon_index * 10_000 + trial_index
+
+    env = BernoulliEnvironment.from_probs(probs, seed=env_seed)
+    policy = policy_factory(env.n_arms, policy_seed)
+    records = run_trial(policy, env, horizon)
+
+    arms = np.array([record.arm for record in records], dtype=int)
+    pseudo_regret_curve = cumulative_pseudo_regret(records)
+    reward_curve = cumulative_reward(records)
+    share_curve = best_arm_share_curve(arms, best_arm)
+    estimated_best_arm = int(np.argmax(np.asarray(policy.values, dtype=float)))
+    checkpoints = checkpoint_steps(horizon)
+
+    checkpoint_regret = {
+        label: float(pseudo_regret_curve[step - 1]) for label, step in checkpoints.items()
+    }
+    checkpoint_reward = {
+        label: float(reward_curve[step - 1]) for label, step in checkpoints.items()
+    }
+
+    return {
+        "regret_curve": pseudo_regret_curve,
+        "reward_curve": reward_curve,
+        "share_curve": share_curve,
+        "final_regret": float(pseudo_regret_curve[-1]),
+        "final_reward": float(reward_curve[-1]),
+        "final_share": float(share_curve[-1]),
+        "identified_best": float(estimated_best_arm == best_arm),
+        "checkpoint_regret": checkpoint_regret,
+        "checkpoint_reward": checkpoint_reward,
+    }
+
+
+def evaluate_environment_horizon_policy(
+    environment_index: int,
+    environment_name: str,
+    probs: list[float],
+    horizon_index: int,
+    horizon_name: str,
+    horizon: int,
+    policy_index: int,
+    policy_name: str,
+    policy_factory: Callable[[int, int], BanditPolicy],
+) -> dict[str, object]:
+    best_arm = int(np.argmax(probs))
+    gap = max(probs) - sorted(probs)[-2]
+    checkpoints = checkpoint_steps(horizon)
+
+    trial_results = [
+        run_single_trial(
+            probs=probs,
+            horizon=horizon,
+            best_arm=best_arm,
+            policy_factory=policy_factory,
+            environment_index=environment_index,
+            horizon_index=horizon_index,
+            policy_index=policy_index,
+            trial_index=trial_index,
+        )
+        for trial_index in range(N_TRIALS)
+    ]
+
+    regret_array = np.vstack([result["regret_curve"] for result in trial_results])
+    reward_array = np.vstack([result["reward_curve"] for result in trial_results])
+    share_array = np.vstack([result["share_curve"] for result in trial_results])
+    final_regret_array = np.array([result["final_regret"] for result in trial_results], dtype=float)
+    final_reward_array = np.array([result["final_reward"] for result in trial_results], dtype=float)
+    final_share_array = np.array([result["final_share"] for result in trial_results], dtype=float)
+    identified_best_array = np.array([result["identified_best"] for result in trial_results], dtype=float)
+
+    checkpoint_regret_summary = {}
+    checkpoint_reward_summary = {}
+    for label in checkpoints:
+        regret_values = np.array(
+            [result["checkpoint_regret"][label] for result in trial_results], dtype=float
+        )
+        reward_values = np.array(
+            [result["checkpoint_reward"][label] for result in trial_results], dtype=float
+        )
+        regret_ci_low, regret_ci_high = mean_confidence_interval(regret_values)
+        reward_ci_low, reward_ci_high = mean_confidence_interval(reward_values)
+        checkpoint_regret_summary[label] = {
+            "mean": float(regret_values.mean()),
+            "ci_low": regret_ci_low,
+            "ci_high": regret_ci_high,
+        }
+        checkpoint_reward_summary[label] = {
+            "mean": float(reward_values.mean()),
+            "ci_low": reward_ci_low,
+            "ci_high": reward_ci_high,
+        }
+
+    regret_ci_low, regret_ci_high = mean_confidence_interval(final_regret_array)
+    identification_ci_low, identification_ci_high = mean_confidence_interval(
+        identified_best_array
+    )
+
+    policy_result = {
+        "regret_curves": regret_array,
+        "reward_curves": reward_array,
+        "share_curves": share_array,
+        "final_regrets": final_regret_array,
+        "final_rewards": final_reward_array,
+        "final_shares": final_share_array,
+        "identified_best": identified_best_array,
+        "mean_regret": regret_array.mean(axis=0),
+        "regret_p10": np.quantile(regret_array, 0.10, axis=0),
+        "regret_p90": np.quantile(regret_array, 0.90, axis=0),
+        "mean_reward": reward_array.mean(axis=0),
+        "reward_p10": np.quantile(reward_array, 0.10, axis=0),
+        "reward_p90": np.quantile(reward_array, 0.90, axis=0),
+        "mean_share": share_array.mean(axis=0),
+        "share_p10": np.quantile(share_array, 0.10, axis=0),
+        "share_p90": np.quantile(share_array, 0.90, axis=0),
+        "mean_final_regret": float(final_regret_array.mean()),
+        "std_final_regret": float(final_regret_array.std(ddof=1)),
+        "final_regret_ci_low": regret_ci_low,
+        "final_regret_ci_high": regret_ci_high,
+        "mean_final_reward": float(final_reward_array.mean()),
+        "std_final_reward": float(final_reward_array.std(ddof=1)),
+        "mean_final_share": float(final_share_array.mean()),
+        "best_arm_identification_rate": float(identified_best_array.mean()),
+        "identification_ci_low": identification_ci_low,
+        "identification_ci_high": identification_ci_high,
+        "checkpoint_regret": checkpoint_regret_summary,
+        "checkpoint_reward": checkpoint_reward_summary,
+    }
+
+    summary_row = {
+        "Environment": environment_name,
+        "Gap": f"{gap:.2f}",
+        "Horizon": horizon_name,
+        "T": str(horizon),
+        "Policy": policy_name,
+        "Final regret": (
+            f"{final_regret_array.mean():.1f} "
+            f"[{regret_ci_low:.1f}, {regret_ci_high:.1f}]"
+        ),
+        "Final reward": (
+            f"{final_reward_array.mean():.1f} "
+            f"+/- {final_reward_array.std(ddof=1):.1f}"
+        ),
+        "Best-arm share": f"{final_share_array.mean():.1%}",
+        "Identify best": (
+            f"{identified_best_array.mean():.1%} "
+            f"[{identification_ci_low:.1%}, {identification_ci_high:.1%}]"
+        ),
+    }
+
+    return {
+        "environment_index": environment_index,
+        "environment_name": environment_name,
+        "probs": probs,
+        "gap": gap,
+        "best_arm": best_arm,
+        "horizon_index": horizon_index,
+        "horizon_name": horizon_name,
+        "horizon": horizon,
+        "policy_index": policy_index,
+        "policy_name": policy_name,
+        "policy_result": policy_result,
+        "summary_row": summary_row,
+    }
+
+
+def render_markdown_table(rows: list[dict[str, object]], columns: list[tuple[str, str]]) -> None:
+    header = "| " + " | ".join(label for _, label in columns) + " |"
+    divider = "|" + "|".join(["---"] * len(columns)) + "|"
+    lines = [header, divider]
+    for row in rows:
+        values = [str(row[key]) for key, _ in columns]
+        lines.append("| " + " | ".join(values) + " |")
+    display(Markdown("\n".join(lines)))
+```
+
+## Run The Sweep
+
+```{python}
+#| label: run-horizon-sweep
+environment_results: dict[str, dict[str, object]] = {}
+summary_rows: list[dict[str, object]] = []
+
+pair_results = Parallel(n_jobs=JOBLIB_N_JOBS, prefer="processes")(
+    delayed(evaluate_environment_horizon_policy)(
+        environment_index=environment_index,
+        environment_name=environment_name,
+        probs=probs,
+        horizon_index=horizon_index,
+        horizon_name=horizon_name,
+        horizon=horizon,
+        policy_index=policy_index,
+        policy_name=policy_name,
+        policy_factory=factory,
+    )
+    for environment_index, (environment_name, probs) in enumerate(ENVIRONMENTS.items())
+    for horizon_index, (horizon_name, horizon) in enumerate(HORIZONS.items())
+    for policy_index, (policy_name, factory) in enumerate(POLICY_FACTORIES.items())
+)
+
+pair_results.sort(
+    key=lambda result: (
+        int(result["environment_index"]),
+        int(result["horizon_index"]),
+        int(result["policy_index"]),
+    )
+)
+
+for pair_result in pair_results:
+    environment_name = pair_result["environment_name"]
+    horizon_name = pair_result["horizon_name"]
+
+    if environment_name not in environment_results:
+        environment_results[environment_name] = {
+            "probs": pair_result["probs"],
+            "gap": pair_result["gap"],
+            "best_arm": pair_result["best_arm"],
+            "horizons": {},
+        }
+
+    if horizon_name not in environment_results[environment_name]["horizons"]:
+        environment_results[environment_name]["horizons"][horizon_name] = {
+            "horizon": pair_result["horizon"],
+            "policies": {},
+        }
+
+    environment_results[environment_name]["horizons"][horizon_name]["policies"][
+        pair_result["policy_name"]
+    ] = pair_result["policy_result"]
+    summary_rows.append(pair_result["summary_row"])
+
+print(
+    f"Ran {len(ENVIRONMENTS)} environments x {len(HORIZONS)} horizons x "
+    f"{len(POLICY_FACTORIES)} policies x {N_TRIALS} trials."
+)
+```
+
+## Summary Metrics
+
+```{python}
+#| label: summary-table
+summary_columns = [
+    ("Environment", "Environment"),
+    ("Gap", "Gap"),
+    ("Horizon", "Horizon"),
+    ("T", "T"),
+    ("Policy", "Policy"),
+    ("Final regret", "Mean final pseudo-regret with 95% CI"),
+    ("Final reward", "Mean final reward +/- sd"),
+    ("Best-arm share", "Mean cumulative best-arm share"),
+    ("Identify best", "P(final estimated-best arm is optimal) with 95% CI"),
+]
+render_markdown_table(summary_rows, summary_columns)
+```
+
+## Early Versus Late Winners
+
+A policy can look strong at short horizons simply because it avoids paying much exploration cost up front. That does not mean it is the best long-run learner. The point of this sweep is to compare rankings at short checkpoints against rankings at the full horizon.
+
+::: callout-important
+## “The best short-horizon policy is not always the best long-horizon policy, because exploration costs are paid early while their benefits arrive later.”
+:::
+
+```{python}
+#| label: checkpoint-winners
+checkpoint_rows: list[dict[str, object]] = []
+
+for environment_name, environment_result in environment_results.items():
+    for horizon_name, horizon_result in environment_result["horizons"].items():
+        policies = horizon_result["policies"]
+        horizon = horizon_result["horizon"]
+        checkpoints = checkpoint_steps(horizon)
+
+        for checkpoint_label in checkpoints:
+            best_regret_policy, best_regret_metrics = min(
+                policies.items(),
+                key=lambda item: item[1]["checkpoint_regret"][checkpoint_label]["mean"],
+            )
+            best_reward_policy, best_reward_metrics = max(
+                policies.items(),
+                key=lambda item: item[1]["checkpoint_reward"][checkpoint_label]["mean"],
+            )
+            checkpoint_rows.append(
+                {
+                    "Environment": environment_name,
+                    "T": str(horizon),
+                    "Checkpoint": checkpoint_label,
+                    "Lowest regret": (
+                        f"{best_regret_policy} "
+                        f"({best_regret_metrics['checkpoint_regret'][checkpoint_label]['mean']:.1f})"
+                    ),
+                    "Highest reward": (
+                        f"{best_reward_policy} "
+                        f"({best_reward_metrics['checkpoint_reward'][checkpoint_label]['mean']:.1f})"
+                    ),
+                }
+            )
+
+checkpoint_columns = [
+    ("Environment", "Environment"),
+    ("T", "T"),
+    ("Checkpoint", "Checkpoint"),
+    ("Lowest regret", "Lowest mean pseudo-regret at checkpoint"),
+    ("Highest reward", "Highest mean reward at checkpoint"),
+]
+render_markdown_table(checkpoint_rows, checkpoint_columns)
+```
+
+## Figure 1: Cumulative Regret Curves By Horizon
+
+```{python}
+#| label: fig-cumulative-regret-by-horizon
+#| fig-cap: Mean cumulative pseudo-regret across trials for each horizon and environment. The shaded bands show the 10th to 90th percentile range across trials.
+for environment_name, environment_result in environment_results.items():
+    horizons_in_order = sorted(
+        environment_result["horizons"].items(), key=lambda item: item[1]["horizon"]
+    )
+    n_horizons = len(horizons_in_order)
+    n_cols = 2
+    n_rows = int(np.ceil(n_horizons / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(10, 3 * n_rows), sharex=False, sharey=False)
+    axes = np.atleast_1d(axes).ravel()
+
+    for ax, (horizon_name, horizon_result) in zip(axes, horizons_in_order):
+        horizon = horizon_result["horizon"]
+        steps = np.arange(1, horizon + 1)
+        for policy_name in PLOT_POLICIES_NO_RANDOM:
+            policy_result = horizon_result["policies"][policy_name]
+            color = POLICY_COLORS[policy_name]
+            ax.plot(steps, policy_result["mean_regret"], label=policy_name, color=color)
+            ax.fill_between(
+                steps,
+                policy_result["regret_p10"],
+                policy_result["regret_p90"],
+                color=color,
+                alpha=0.12,
+            )
+        ax.set_title(f"{environment_name}: {horizon_name} (T={horizon})")
+        ax.set_xlabel("Step")
+        ax.set_ylabel("Cumulative pseudo-regret")
+        ax.grid(alpha=0.25)
+
+    for ax in axes[len(horizons_in_order):]:
+        ax.axis("off")
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=2, frameon=False)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    plt.show()
+```
+
+## Figure 2: Cumulative Reward Curves By Horizon
+
+```{python}
+#| label: fig-cumulative-reward-by-horizon
+#| fig-cap: Mean cumulative reward across trials for each horizon and environment. This view makes short-run practical performance easier to compare than pseudo-regret alone.
+for environment_name, environment_result in environment_results.items():
+    horizons_in_order = sorted(
+        environment_result["horizons"].items(), key=lambda item: item[1]["horizon"]
+    )
+    n_horizons = len(horizons_in_order)
+    n_cols = 2
+    n_rows = int(np.ceil(n_horizons / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(10, 3 * n_rows), sharex=False, sharey=False)
+    axes = np.atleast_1d(axes).ravel()
+
+    for ax, (horizon_name, horizon_result) in zip(axes, horizons_in_order):
+        horizon = horizon_result["horizon"]
+        steps = np.arange(1, horizon + 1)
+        for policy_name in PLOT_POLICIES_NO_RANDOM:
+            policy_result = horizon_result["policies"][policy_name]
+            color = POLICY_COLORS[policy_name]
+            ax.plot(steps, policy_result["mean_reward"], label=policy_name, color=color)
+            ax.fill_between(
+                steps,
+                policy_result["reward_p10"],
+                policy_result["reward_p90"],
+                color=color,
+                alpha=0.12,
+            )
+        ax.set_title(f"{environment_name}: {horizon_name} (T={horizon})")
+        ax.set_xlabel("Step")
+        ax.set_ylabel("Cumulative reward")
+        ax.grid(alpha=0.25)
+
+    for ax in axes[len(horizons_in_order):]:
+        ax.axis("off")
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=2, frameon=False)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    plt.show()
+```
+
+## Figure 3: Final Regret Versus Horizon
+
+```{python}
+#| label: fig-final-regret-vs-horizon
+#| fig-cap: Mean final pseudo-regret as a function of horizon. Error bars show 95% confidence intervals for the mean across trials.
+for environment_name, environment_result in environment_results.items():
+    fig, ax = plt.subplots(figsize=(6, 3))
+    horizons_in_order = sorted(
+        environment_result["horizons"].items(), key=lambda item: item[1]["horizon"]
+    )
+    horizon_values = np.array([item[1]["horizon"] for item in horizons_in_order])
+
+    for policy_name in PLOT_POLICIES_NO_RANDOM:
+        means = []
+        ci_half_widths = []
+        for _, horizon_result in horizons_in_order:
+            policy_result = horizon_result["policies"][policy_name]
+            means.append(policy_result["mean_final_regret"])
+            ci_half_widths.append(
+                policy_result["mean_final_regret"] - policy_result["final_regret_ci_low"]
+            )
+        ax.errorbar(
+            horizon_values,
+            means,
+            yerr=ci_half_widths,
+            marker="o",
+            capsize=4,
+            linewidth=2,
+            label=policy_name,
+            color=POLICY_COLORS[policy_name],
+        )
+
+    ax.set_xlabel("Horizon T")
+    ax.set_ylabel("Final cumulative pseudo-regret")
+    ax.set_title(f"{environment_name}: final pseudo-regret versus horizon")
+    ax.grid(alpha=0.25)
+    ax.legend(frameon=False)
+    plt.show()
+```
+
+## Figure 4: Final Best-Arm Identification Rate Versus Horizon
+
+```{python}
+#| label: fig-identification-vs-horizon
+#| fig-cap: Probability that each policy finishes a trial with the true best arm as its highest estimated-value arm. Error bars show 95% confidence intervals.
+for environment_name, environment_result in environment_results.items():
+    fig, ax = plt.subplots(figsize=(6, 3))
+    horizons_in_order = sorted(
+        environment_result["horizons"].items(), key=lambda item: item[1]["horizon"]
+    )
+    horizon_values = np.array([item[1]["horizon"] for item in horizons_in_order])
+
+    for policy_name in PLOT_POLICIES_NO_RANDOM:
+        identification_rates = []
+        ci_half_widths = []
+        for _, horizon_result in horizons_in_order:
+            policy_result = horizon_result["policies"][policy_name]
+            identification_rates.append(policy_result["best_arm_identification_rate"])
+            ci_half_widths.append(
+                policy_result["identification_ci_high"]
+                - policy_result["best_arm_identification_rate"]
+            )
+        ax.errorbar(
+            horizon_values,
+            identification_rates,
+            yerr=ci_half_widths,
+            marker="o",
+            linewidth=2,
+            capsize=4,
+            label=policy_name,
+            color=POLICY_COLORS[policy_name],
+        )
+
+    ax.set_xlabel("Horizon T")
+    ax.set_ylabel("Probability final estimated-best arm is optimal")
+    ax.set_ylim(0.0, 1.05)
+    ax.set_title(f"{environment_name}: identification improves with more time")
+    ax.grid(alpha=0.25)
+    ax.legend(frameon=False)
+    plt.show()
+```
+
+## Discussion
+
+This sweep isolates horizon by holding the environment fixed and only changing how long the policy is allowed to learn. That matters because horizon changes the value of exploration: when the horizon is short, exploration cost may never be recovered, but when the horizon is long, early exploration can pay for itself many times over.
+
+The easier environment shows what happens when the signal is strong enough that good policies can identify the best arm quickly. The harder environment is more revealing because it makes the exploration-versus-exploitation tradeoff expensive for longer. That is where short-horizon and long-horizon rankings are most likely to disagree.
+
+Pseudo-regret remains the main learning-efficiency metric because it measures expected opportunity cost without adding Bernoulli reward noise. Cumulative reward is still important because it reflects the practical experience during the run. A policy can have respectable final identification and still produce poor reward during learning if it wastes too much traffic on weak arms.
+
+**Which policies look good early versus late?** Policies that exploit more aggressively can look surprisingly decent at short horizons because they avoid paying large upfront exploration costs. But as the horizon grows, policies with better uncertainty handling should improve their ranking because they convert exploration into better long-run allocation.
+
+**What do I expect to learn from this sweep?** I expect to see that “best policy” depends on the decision frame. If I care about immediate reward, I may prefer a different policy than if I care about long-run regret or final identification.
+
+::: callout-important
+## Horizon changes whether exploration is a cost you regret or an investment that pays back.
+:::
+
+**Referring to my original prediction**
+TS did in fact have a consistently lower regret across test. However, at short time horizons that have harder gaps, the policy that led to the highest mean rewards at different checkpoints alternated considerably. It almost seems like there was actually no significant difference between the policies with this combinations of horizon (<500) and hard gap.
+
+
+**Why does this matter?**
+Even though for some difficulty and short horizons, the final best reward policy was inconclusive, TS was the clear winner in terms of learning efficiency. Final rewards are inherently very noise, so, just like I postulated, the other policies could have won from pure chance. 
