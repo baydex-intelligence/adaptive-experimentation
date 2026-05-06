@@ -61,27 +61,16 @@ I predict that Thompson sampling will have the best regret-identification tradeo
 #| label: setup
 from __future__ import annotations
 
-import sys
 from collections.abc import Callable
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 from IPython.display import Markdown, display
 from joblib import Parallel, delayed
 
+from experiments.bootstrap import ensure_src_on_path
 
-def find_project_root(start: Path) -> Path:
-    for candidate in (start, *start.parents):
-        if (candidate / "pyproject.toml").exists() and (candidate / "src").exists():
-            return candidate
-    raise RuntimeError("Could not find the project root from the current working directory.")
-
-
-PROJECT_ROOT = find_project_root(Path.cwd())
-SRC_DIR = PROJECT_ROOT / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
+PROJECT_ROOT = ensure_src_on_path()
 
 from adaptive_experiments.bandits.base import BanditPolicy
 from adaptive_experiments.plotting.tables import markdown_table
