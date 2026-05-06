@@ -84,47 +84,18 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from adaptive_experiments.bandits.base import BanditPolicy
-from adaptive_experiments.bandits.decaying_epsilon import DecayingEpsilon
-from adaptive_experiments.bandits.thompson import ThompsonSampling
-from adaptive_experiments.bandits.ucb import UCB1
+from adaptive_experiments.plotting.tables import markdown_table
 from adaptive_experiments.metrics.regret import cumulative_pseudo_regret
 from adaptive_experiments.metrics.reward import cumulative_reward
 from adaptive_experiments.simulation.environments import BernoulliEnvironment
+from adaptive_experiments.simulation.evaluation import (
+    best_arm_share_curve,
+    default_policy_colors,
+    late_stage_best_arm_share,
+    make_default_policy_factories,
+    mean_confidence_interval,
+)
 from adaptive_experiments.simulation.runners import run_trial
-
-
-class RandomPolicy(BanditPolicy):
-    """Uniform random baseline used for comparison."""
-
-    def __init__(self, n_arms: int, seed: int | None = None) -> None:
-        super().__init__(n_arms)
-        self._rng = np.random.default_rng(seed)
-
-    def select_arm(self) -> int:
-        return int(self._rng.integers(0, self.n_arms))
-
-
-def make_random_policy(n_arms: int, seed: int) -> BanditPolicy:
-    return RandomPolicy(n_arms, seed=seed)
-
-
-def make_decaying_epsilon_policy(n_arms: int, seed: int) -> BanditPolicy:
-    return DecayingEpsilon(
-        n_arms,
-        initial_epsilon=INITIAL_EPSILON,
-        min_epsilon=MIN_EPSILON,
-        decay_rate=DECAY_RATE,
-        seed=seed,
-    )
-
-
-def make_ucb1_policy(n_arms: int, seed: int) -> BanditPolicy:
-    del seed
-    return UCB1(n_arms)
-
-
-def make_thompson_policy(n_arms: int, seed: int) -> BanditPolicy:
-    return ThompsonSampling(n_arms, seed=seed)
 
 
 SCENARIOS: dict[str, list[float]] = {
@@ -145,44 +116,15 @@ MIN_EPSILON = 0.01
 DECAY_RATE = 0.01
 BASE_SEED = 2026
 JOBLIB_N_JOBS = -1
-POLICY_FACTORIES: dict[str, Callable[[int, int], BanditPolicy]] = {
-    "Random": make_random_policy,
-    "DecayingEpsilon": make_decaying_epsilon_policy,
-    "UCB1": make_ucb1_policy,
-    "Thompson": make_thompson_policy,
-}
-POLICY_COLORS = {
-    "Random": "tab:blue",
-    "DecayingEpsilon": "tab:orange",
-    "UCB1": "tab:green",
-    "Thompson": "tab:red",
-}
+POLICY_FACTORIES: dict[str, Callable[[int, int], BanditPolicy]] = make_default_policy_factories(
+    initial_epsilon=INITIAL_EPSILON,
+    min_epsilon=MIN_EPSILON,
+    decay_rate=DECAY_RATE,
+)
+POLICY_COLORS = default_policy_colors()
 PLOT_POLICIES_NO_RANDOM = [
     policy_name for policy_name in POLICY_FACTORIES if policy_name != "Random"
 ]
-
-
-def best_arm_share_curve(arms: np.ndarray, best_arm: int) -> np.ndarray:
-    hits = (arms == best_arm).astype(float)
-    steps = np.arange(1, len(arms) + 1, dtype=float)
-    return np.cumsum(hits) / steps
-
-
-def late_stage_best_arm_share(
-    arms: np.ndarray,
-    best_arm: int,
-    window: int = LATE_STAGE_WINDOW,
-) -> float:
-    tail = arms[-window:] if len(arms) >= window else arms
-    return float(np.mean(tail == best_arm))
-
-
-def mean_confidence_interval(values: np.ndarray, z_value: float = Z_VALUE) -> tuple[float, float]:
-    mean = float(values.mean())
-    if len(values) < 2:
-        return mean, mean
-    margin = z_value * float(values.std(ddof=1)) / np.sqrt(len(values))
-    return mean - margin, mean + margin
 
 
 def run_single_trial(
@@ -213,7 +155,11 @@ def run_single_trial(
         "final_regret": float(pseudo_regret_curve[-1]),
         "final_reward": float(reward_curve[-1]),
         "final_share": float(share_curve[-1]),
-        "late_stage_share": late_stage_best_arm_share(arms, best_arm),
+        "late_stage_share": late_stage_best_arm_share(
+            arms,
+            best_arm,
+            window=LATE_STAGE_WINDOW,
+        ),
         "identified_best": float(estimated_best_arm == best_arm),
     }
 
@@ -250,9 +196,10 @@ def evaluate_scenario_policy(
     late_stage_share_array = np.array([result["late_stage_share"] for result in trial_results], dtype=float)
     identified_best_array = np.array([result["identified_best"] for result in trial_results], dtype=float)
 
-    regret_ci_low, regret_ci_high = mean_confidence_interval(final_regret_array)
+    regret_ci_low, regret_ci_high = mean_confidence_interval(final_regret_array, z_value=Z_VALUE)
     identification_ci_low, identification_ci_high = mean_confidence_interval(
-        identified_best_array
+        identified_best_array,
+        z_value=Z_VALUE,
     )
 
     policy_result = {
@@ -317,14 +264,6 @@ def evaluate_scenario_policy(
     }
 
 
-def render_markdown_table(rows: list[dict[str, object]], columns: list[tuple[str, str]]) -> None:
-    header = "| " + " | ".join(label for _, label in columns) + " |"
-    divider = "|" + "|".join(["---"] * len(columns)) + "|"
-    lines = [header, divider]
-    for row in rows:
-        values = [str(row[key]) for key, _ in columns]
-        lines.append("| " + " | ".join(values) + " |")
-    display(Markdown("\n".join(lines)))
 ```
 
 ## Run The Sweep
@@ -386,7 +325,7 @@ summary_columns = [
     ("Late-stage share", "Mean best-arm share in final 200 steps"),
     ("Identify best", "P(final estimated-best arm is optimal) with 95% CI"),
 ]
-render_markdown_table(summary_rows, summary_columns)
+display(Markdown(markdown_table(summary_rows, summary_columns)))
 ```
 
 ## Two-notions of "best" scenario. 
@@ -434,7 +373,7 @@ winners_columns = [
     ("Lowest regret", "Lowest mean final pseudo-regret"),
     ("Best identification", "Highest best-arm identification rate"),
 ]
-render_markdown_table(winners_rows, winners_columns)
+display(Markdown(markdown_table(winners_rows, winners_columns)))
 ```
 
 ## Figure 1: Cumulative Regret By Scenario

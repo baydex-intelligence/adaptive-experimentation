@@ -1,0 +1,43 @@
+---
+title: What changes when there are more arms?
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-fold: true
+execute:
+  freeze: auto
+  echo: true
+  warning: false
+  message: false
+  keep-ipynb: false
+---
+
+## Question: How does increasing the number of arms change learning speed, regret, and best-arm identification for common bandit policies?
+
+**Core Setup:** 
+
+**Policies to compare:**
+
+- random
+- decaying epsilon-greedy
+- UCB1
+- Thompson sampling
+
+**Metrics to report:**
+
+
+**What to plot:**
+
+
+## My Prediction
+
+
+## Experiment Setup
+
+## Discussion
+
+**Referring to my original prediction**
+
+
+**Why does this matter?**

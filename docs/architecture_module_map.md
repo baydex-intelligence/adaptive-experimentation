@@ -25,6 +25,7 @@ Root: `src/adaptive_experiments/`
 | `arms.py` | `BernoulliArm` | Single arm with fixed Bernoulli success probability |
 | `base.py` | `BanditPolicy` (ABC) | Shared interface: `select_arm`, `update`, `reset` |
 | `epsilon_greedy.py` | `EpsilonGreedy(BanditPolicy)` | Fixed-ε explore-exploit policy |
+| `random.py` | `RandomPolicy(BanditPolicy)` | Uniform-random baseline policy |
 | `ucb.py` | `UCB1(BanditPolicy)` | Upper confidence bound policy |
 | `thompson.py` | `ThompsonSampling(BanditPolicy)` | Beta-Bernoulli Thompson sampling |
 
@@ -35,6 +36,7 @@ Root: `src/adaptive_experiments/`
 | Module | Public surface | Responsibility |
 |--------|---------------|----------------|
 | `environments.py` | `BernoulliEnvironment` | k-armed Bernoulli bandit environment |
+| `evaluation.py` | `make_default_policy_factories`, `default_policy_colors`, `checkpoint_steps`, `best_arm_share_curve`, `late_stage_best_arm_share`, `mean_confidence_interval` | Reusable helper utilities for sweep-style experiment notebooks |
 | `runners.py` | `run_trial`, `run_repeated_trials`, `average_cumulative_reward`, `average_cumulative_regret` | Execute policy against environment |
 | `scenarios.py` | `easy_two_arm`, `close_two_arm`, `four_arm` | Named environment presets |
 | `delayed_feedback.py` | _(stub — Milestone 3)_ | Delayed reward simulation |
@@ -56,6 +58,7 @@ Root: `src/adaptive_experiments/`
 | Module | Public surface | Responsibility |
 |--------|---------------|----------------|
 | `curves.py` | `plot_cumulative_regret`, `plot_cumulative_reward`, `plot_peeking_fpr` | Matplotlib curve helpers |
+| `tables.py` | `markdown_table` | Markdown table-string builder for notebook summaries |
 
 ---
 
