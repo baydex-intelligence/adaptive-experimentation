@@ -8,7 +8,7 @@ at guranteeing the significance of results.
 In essence, a peeking simulation is a monte-carlo audit of a particular policy. 
 
 Usage:
-    poetry run python scripts/run_peeking_simulation.py
+    poetry run python experiments/run_peeking_simulation.py
 """
 
 import sys

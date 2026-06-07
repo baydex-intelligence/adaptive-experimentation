@@ -86,4 +86,4 @@ BernoulliEnvironment  ←──────────────────�
 - `bandits/` depends only on numpy and `bandits/base.py`.
 - `simulation/` depends on `bandits/base.py` and `bandits/arms.py`.
 - `ab_testing/` depends only on numpy, scipy, and stdlib.
-- No module imports from `scripts/` or `tests/`.
+- No module imports from `experiments/` or `tests/`.

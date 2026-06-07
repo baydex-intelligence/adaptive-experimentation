@@ -69,23 +69,30 @@ adaptive-experimentation/
 │   ├── bandits/
 │   │   ├── arms.py                     # BernoulliArm
 │   │   ├── base.py                     # Policy abstract base class
+│   │   ├── decaying_epsilon.py         # Decaying epsilon-greedy
 │   │   ├── epsilon_greedy.py
+│   │   ├── random.py                   # Uniform random baseline
 │   │   ├── ucb.py                      # UCB1
 │   │   └── thompson.py                 # Beta-Bernoulli Thompson sampling
 │   ├── simulation/
 │   │   ├── environments.py             # BernoulliEnvironment
 │   │   ├── runners.py                  # run_bandit_trial / run_policy
 │   │   ├── scenarios.py                # Named scenario helpers
+│   │   ├── evaluation.py               # Sweep evaluation helpers
 │   │   └── delayed_feedback.py         # Delayed reward stub (Milestone 3)
 │   ├── metrics/
 │   │   ├── regret.py                   # Cumulative regret
 │   │   ├── reward.py                   # Cumulative reward
 │   │   └── allocation.py               # Arm selection share
 │   └── plotting/
-│       └── curves.py                   # Regret / reward curves
-├── scripts/
+│       ├── curves.py                   # Regret / reward curves
+│       └── tables.py                   # Markdown table helper
+├── experiments/
 │   ├── run_peeking_simulation.py
-│   └── run_bandit_comparison.py
+│   ├── run_bandit_comparison.py
+│   ├── what_happens_at_different_difficulty.qmd
+│   ├── which_policies_look_good_early_vs_late.qmd
+│   └── when_you_add_arms.qmd
 ├── reports/
 │   ├── peeking-breaks-ab-tests.md
 │   ├── bandit-policy-comparison.md
@@ -108,7 +115,7 @@ adaptive-experimentation/
 - Minimum sample size helper
 - Peeking simulation: shows that checking results early and stopping when p < 0.05
   inflates the false-positive rate well above the nominal α
-- Script: `scripts/run_peeking_simulation.py`
+- Script: `experiments/run_peeking_simulation.py`
 - Report: `reports/peeking-breaks-ab-tests.md`
 
 ### Milestone 2 — Core bandit algorithms and comparison ✅
@@ -116,7 +123,7 @@ adaptive-experimentation/
 - Policy base class (abstract `select_arm` / `update`)
 - Epsilon-greedy, UCB1, Thompson sampling
 - Simulation runner with cumulative reward, regret, and allocation share
-- Script: `scripts/run_bandit_comparison.py`
+- Script: `experiments/run_bandit_comparison.py`
 - Report: `reports/bandit-policy-comparison.md`
 
 ### Milestone 3 — Delayed feedback, non-stationarity, production caveats (TODO)
@@ -137,10 +144,10 @@ poetry install
 poetry run pytest
 
 # Run peeking simulation
-poetry run python scripts/run_peeking_simulation.py
+poetry run python experiments/run_peeking_simulation.py
 
 # Run bandit comparison
-poetry run python scripts/run_bandit_comparison.py
+poetry run python experiments/run_bandit_comparison.py
 ```
 
 ## Quarto preview
@@ -191,4 +198,3 @@ When talking about this project in an interview:
 - **Trade-offs**: "A/B testing gives you a clean causal claim backed by a pre-registered
   hypothesis. Bandits minimize regret but make inference harder because allocation is
   adaptive and not independent of outcomes."
-

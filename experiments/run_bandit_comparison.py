@@ -2,7 +2,7 @@
 Compare random, epsilon-greedy, UCB1, and Thompson sampling on a Bernoulli bandit.
 
 Usage:
-    poetry run python scripts/run_bandit_comparison.py
+    poetry run python experiments/run_bandit_comparison.py
 """
 
 import sys
