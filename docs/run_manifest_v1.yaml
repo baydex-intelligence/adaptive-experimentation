@@ -1,0 +1,81 @@
+# Template for local experiment run manifests.
+# Copy this to experiments/runs/{run_id}/manifest.yaml for real runs.
+
+manifest_version: run-manifest-v1
+
+run:
+  run_id: "<YYYYMMDD-HHMMSS-short-name>"
+  created_at: "<ISO-8601 timestamp with timezone>"
+  owner: "ethan"
+  agent: "bayes"
+  purpose: "<one-sentence experiment question>"
+  status: "planned|completed|failed|aborted"
+
+code:
+  repo: "adaptive-experimentation"
+  git_sha: "<git commit SHA>"
+  git_branch: "<branch name>"
+  dirty: false
+  dirty_summary: []
+
+environment:
+  python: "3.13.12"
+  package_manager: "poetry"
+  lockfile: "poetry.lock"
+  platform: "<local platform>"
+
+command:
+  working_directory: "<repo root>"
+  invocation: "<exact command>"
+  timeout_minutes: 15
+
+config:
+  source: "script_constants|quarto_parameters|yaml"
+  config_hash: "<sha256 of resolved config values>"
+  values:
+    n_trials: null
+    n_steps: null
+    base_seed: null
+    policies: []
+    scenarios: []
+
+simulation:
+  data_source: "simulated_bernoulli_bandits"
+  external_data_required: false
+  arm_probabilities: []
+  seed_strategy: "<how environment and policy seeds were derived>"
+  manipulated_factor: "<single changed factor>"
+  fixed_factors: []
+
+evaluation:
+  primary_metric: "cumulative_pseudo_regret"
+  primary_metric_value: null
+  secondary_metrics:
+    cumulative_reward: null
+    best_arm_share: null
+    best_arm_identification_rate: null
+    final_pseudo_regret: null
+  baseline_run_id: null
+  comparison_notes: ""
+
+artifacts:
+  run_dir: "experiments/runs/{run_id}"
+  tables: []
+  plots: []
+  report: null
+
+checks:
+  tests:
+    command: "poetry run pytest"
+    passed: null
+  smoke:
+    command: "poetry run pytest tests/test_simulation_runner.py tests/test_evaluation_helpers.py"
+    passed: null
+  overwrote_tracked_artifacts: false
+
+notes:
+  prediction_before: ""
+  outcome: ""
+  caveats: []
+  decision: "keep|rerun|reject|investigate|background-only"
+  next_action: ""

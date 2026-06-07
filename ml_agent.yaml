@@ -1,0 +1,89 @@
+schema_version: ml-agent-v1
+
+project:
+  name: adaptive-experimentation
+  owner: ethan
+  purpose: >
+    Learn and demonstrate A/B testing and multi-armed bandit behavior through
+    bounded Bernoulli simulations, tests, and short evidence-backed reports.
+
+commands:
+  test: "poetry run pytest"
+  smoke: "poetry run pytest tests/test_simulation_runner.py tests/test_evaluation_helpers.py"
+  run_peeking: "poetry run python experiments/run_peeking_simulation.py"
+  run_bandit_comparison: "poetry run python experiments/run_bandit_comparison.py"
+  render_difficulty_sweep: >
+    poetry run quarto render experiments/what_happens_at_different_difficulty.qmd --to html
+  render_horizon_sweep: >
+    poetry run quarto render experiments/which_policies_look_good_early_vs_late.qmd --to html
+  render_many_arm_sweep: >
+    poetry run quarto render experiments/when_you_add_arms.qmd --to html
+
+tracking:
+  backend: local
+  run_dir_template: "experiments/runs/{run_id}"
+  manifest_template: "docs/run_manifest_v1.yaml"
+  manifest_path_template: "experiments/runs/{run_id}/manifest.yaml"
+  report_dir: "reports"
+
+data:
+  dataset_name: simulated_bernoulli_bandits
+  version_source: config_and_seed
+  external_data_required: false
+
+metrics:
+  primary: cumulative_pseudo_regret
+  secondary:
+    - cumulative_reward
+    - best_arm_share
+    - best_arm_identification_rate
+    - final_pseudo_regret
+    - regret_confidence_interval
+
+experiments:
+  completed:
+    - peeking_false_positive_rate
+    - bandit_policy_comparison
+    - difficulty_gap_sweep
+    - horizon_sweep
+  next_candidate:
+    name: many_arm_sweep
+    question: "What changes when there are more arms?"
+  deferred_or_removed:
+    - epsilon_sensitivity
+
+limits:
+  max_runtime_minutes: 15
+  max_cost_usd: 0
+  require_approval_for_long_runs: true
+  require_approval_for_report_overwrite: true
+
+artifacts:
+  generated_run_dir: "experiments/runs/"
+  tracked_reports:
+    - "reports/peeking-breaks-ab-tests.md"
+    - "reports/bandit-policy-comparison.md"
+    - "reports/production-caveats.md"
+  fixed_output_paths:
+    - "reports/peeking_fpr.png"
+    - "reports/bandit_comparison_regret.png"
+
+protected_actions:
+  - "Do not overwrite tracked report PNGs without an explicit run plan."
+  - "Do not treat unmanifested report numbers as formal experiment claims."
+  - "Do not start contextual bandits before the remaining non-contextual sweeps are resolved."
+  - "Do not add MLflow or W&B until local manifests prove useful."
+
+claim_gate:
+  minimum_rule: "no manifest, no claim"
+  required_fields:
+    - git_sha
+    - dirty_state
+    - command
+    - config_hash
+    - seeds
+    - scenario_parameters
+    - metrics
+    - artifacts
+    - tests
+    - caveats
