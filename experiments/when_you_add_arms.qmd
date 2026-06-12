@@ -1,5 +1,5 @@
 ---
-title: What changes when there are more arms?
+title: What Changes When There Are More Arms?
 format:
   html:
     toc: true
@@ -15,7 +15,12 @@ execute:
 
 ## Question: How does increasing the number of arms change learning speed, regret, and best-arm identification for common bandit policies?
 
-**Core Setup:** 
+**Core Setup:** Use Bernoulli bandit environments, hold the horizon fixed, and vary three
+things deliberately:
+
+- number of arms: 2, 5, 10, and 20
+- arm difficulty: easy, medium, and hard gaps between the best and second-best arm
+- arm-generation method: one clear ladder versus a crowded top set of near-best arms
 
 **Policies to compare:**
 
@@ -26,18 +31,701 @@ execute:
 
 **Metrics to report:**
 
+- final cumulative pseudo-regret
+- final cumulative reward
+- cumulative best-arm share
+- late-stage best-arm share
+- final best-arm identification rate
+- uncertainty across trials
 
 **What to plot:**
 
+- final pseudo-regret versus number of arms
+- final best-arm identification versus number of arms
+- best-arm allocation share over time for representative scenarios
+- Thompson sampling's regret gap versus the next-best non-random policy
 
 ## My Prediction
 
+I predict Thompson sampling will remain the strongest policy on cumulative pseudo-regret in
+most scenarios because it turns uncertainty into proportional exploration instead of using a
+fixed exploration rule. I do not expect it to dominate every metric. In crowded-top settings,
+final best-arm identification should get much harder because several arms are nearly tied, and
+random allocation may sometimes identify the best arm more often while still wasting far more
+traffic.
+
+The key lesson I expect is that "more arms" is not one difficulty knob. A 20-arm problem with
+one obvious winner is different from a 20-arm problem with many plausible near-winners.
 
 ## Experiment Setup
 
+```{python}
+#| label: setup
+from __future__ import annotations
+
+import os
+import sys
+from collections.abc import Callable
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from IPython.display import Markdown, display
+from joblib import Parallel, delayed
+
+PROJECT_ROOT = Path.cwd()
+if not (PROJECT_ROOT / "src").exists():
+    PROJECT_ROOT = PROJECT_ROOT.parent
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from adaptive_experiments.bandits.base import BanditPolicy
+from adaptive_experiments.metrics.regret import cumulative_pseudo_regret
+from adaptive_experiments.metrics.reward import cumulative_reward
+from adaptive_experiments.plotting.tables import markdown_table
+from adaptive_experiments.simulation.environments import BernoulliEnvironment
+from adaptive_experiments.simulation.evaluation import (
+    best_arm_share_curve,
+    default_policy_colors,
+    late_stage_best_arm_share,
+    make_default_policy_factories,
+    mean_confidence_interval,
+)
+from adaptive_experiments.simulation.runners import run_trial
+
+
+ARM_COUNTS = (2, 5, 10, 20)
+DIFFICULTIES: dict[str, float] = {
+    "Easy": 0.20,
+    "Medium": 0.10,
+    "Hard": 0.03,
+}
+GENERATION_METHODS = ("single_winner_ladder", "crowded_top")
+BEST_P = 0.60
+N_STEPS = 2_000
+N_TRIALS = 300
+LATE_STAGE_WINDOW = 200
+Z_VALUE = 1.96
+INITIAL_EPSILON = 0.20
+MIN_EPSILON = 0.01
+DECAY_RATE = 0.01
+BASE_SEED = 2026
+JOBLIB_N_JOBS = -1
+POLICY_FACTORIES: dict[str, Callable[[int, int], BanditPolicy]] = make_default_policy_factories(
+    initial_epsilon=INITIAL_EPSILON,
+    min_epsilon=MIN_EPSILON,
+    decay_rate=DECAY_RATE,
+)
+POLICY_COLORS = default_policy_colors()
+PLOT_POLICIES_NO_RANDOM = [
+    policy_name for policy_name in POLICY_FACTORIES if policy_name != "Random"
+]
+RUN_DIR = os.environ.get("ADAPTIVE_EXPERIMENT_RUN_DIR")
+RUN_PATH = Path(RUN_DIR)
+if RUN_DIR and not RUN_PATH.is_absolute():
+    RUN_PATH = PROJECT_ROOT / RUN_PATH
+
+
+def make_arm_probabilities(n_arms: int, gap: float, generation_method: str) -> list[float]:
+    if n_arms < 2:
+        raise ValueError("n_arms must be at least 2")
+
+    if generation_method == "single_winner_ladder":
+        floor = max(0.05, BEST_P - gap - 0.25)
+        suboptimal = np.linspace(floor, BEST_P - gap, n_arms - 1)
+    elif generation_method == "crowded_top":
+        cluster_size = min(n_arms - 1, max(1, n_arms // 3))
+        tail_size = n_arms - 1 - cluster_size
+        cluster = BEST_P - gap * np.linspace(1.0, 2.0, cluster_size)
+        tail = (
+            np.linspace(max(0.05, BEST_P - 0.30), BEST_P - 0.15, tail_size)
+            if tail_size > 0
+            else np.array([], dtype=float)
+        )
+        suboptimal = np.concatenate([tail, cluster])
+        suboptimal.sort()
+    else:
+        raise ValueError(f"Unsupported generation method: {generation_method}")
+
+    probabilities = np.concatenate([suboptimal, np.array([BEST_P])])
+    return [float(np.clip(probability, 0.01, 0.99)) for probability in probabilities]
+
+
+def run_single_trial(
+    probs: list[float],
+    best_arm: int,
+    policy_factory: Callable[[int, int], BanditPolicy],
+    scenario_index: int,
+    policy_index: int,
+    trial_index: int,
+) -> dict[str, np.ndarray | float]:
+    env_seed = BASE_SEED + scenario_index * 100_000 + trial_index
+    policy_seed = BASE_SEED + policy_index * 100_000 + scenario_index * 1_000 + trial_index
+
+    env = BernoulliEnvironment.from_probs(probs, seed=env_seed)
+    policy = policy_factory(env.n_arms, policy_seed)
+    records = run_trial(policy, env, N_STEPS)
+
+    arms = np.array([record.arm for record in records], dtype=int)
+    pseudo_regret_curve = cumulative_pseudo_regret(records)
+    reward_curve = cumulative_reward(records)
+    share_curve = best_arm_share_curve(arms, best_arm)
+    estimated_best_arm = int(np.argmax(np.asarray(policy.values, dtype=float)))
+
+    return {
+        "regret_curve": pseudo_regret_curve,
+        "reward_curve": reward_curve,
+        "share_curve": share_curve,
+        "final_regret": float(pseudo_regret_curve[-1]),
+        "final_reward": float(reward_curve[-1]),
+        "final_share": float(share_curve[-1]),
+        "late_stage_share": late_stage_best_arm_share(
+            arms,
+            best_arm,
+            window=LATE_STAGE_WINDOW,
+        ),
+        "identified_best": float(estimated_best_arm == best_arm),
+    }
+
+
+def evaluate_scenario_policy(
+    scenario_index: int,
+    n_arms: int,
+    difficulty_name: str,
+    gap: float,
+    generation_method: str,
+    policy_index: int,
+    policy_name: str,
+    policy_factory: Callable[[int, int], BanditPolicy],
+) -> dict[str, object]:
+    probs = make_arm_probabilities(n_arms, gap, generation_method)
+    best_arm = int(np.argmax(probs))
+
+    trial_results = [
+        run_single_trial(
+            probs=probs,
+            best_arm=best_arm,
+            policy_factory=policy_factory,
+            scenario_index=scenario_index,
+            policy_index=policy_index,
+            trial_index=trial_index,
+        )
+        for trial_index in range(N_TRIALS)
+    ]
+
+    regret_array = np.vstack([result["regret_curve"] for result in trial_results])
+    reward_array = np.vstack([result["reward_curve"] for result in trial_results])
+    share_array = np.vstack([result["share_curve"] for result in trial_results])
+    final_regret_array = np.array([result["final_regret"] for result in trial_results])
+    final_reward_array = np.array([result["final_reward"] for result in trial_results])
+    final_share_array = np.array([result["final_share"] for result in trial_results])
+    late_stage_share_array = np.array([result["late_stage_share"] for result in trial_results])
+    identified_best_array = np.array([result["identified_best"] for result in trial_results])
+
+    regret_ci_low, regret_ci_high = mean_confidence_interval(final_regret_array, z_value=Z_VALUE)
+    identification_ci_low, identification_ci_high = mean_confidence_interval(
+        identified_best_array,
+        z_value=Z_VALUE,
+    )
+
+    policy_result = {
+        "regret_curves": regret_array,
+        "reward_curves": reward_array,
+        "share_curves": share_array,
+        "final_regrets": final_regret_array,
+        "final_rewards": final_reward_array,
+        "final_shares": final_share_array,
+        "identified_best": identified_best_array,
+        "mean_regret": regret_array.mean(axis=0),
+        "regret_p10": np.quantile(regret_array, 0.10, axis=0),
+        "regret_p90": np.quantile(regret_array, 0.90, axis=0),
+        "mean_reward": reward_array.mean(axis=0),
+        "mean_share": share_array.mean(axis=0),
+        "share_p10": np.quantile(share_array, 0.10, axis=0),
+        "share_p90": np.quantile(share_array, 0.90, axis=0),
+        "mean_final_regret": float(final_regret_array.mean()),
+        "std_final_regret": float(final_regret_array.std(ddof=1)),
+        "final_regret_ci_low": regret_ci_low,
+        "final_regret_ci_high": regret_ci_high,
+        "mean_final_reward": float(final_reward_array.mean()),
+        "std_final_reward": float(final_reward_array.std(ddof=1)),
+        "mean_final_share": float(final_share_array.mean()),
+        "mean_late_stage_share": float(late_stage_share_array.mean()),
+        "best_arm_identification_rate": float(identified_best_array.mean()),
+        "identification_ci_low": identification_ci_low,
+        "identification_ci_high": identification_ci_high,
+    }
+
+    summary_row = {
+        "Arms": str(n_arms),
+        "Difficulty": difficulty_name,
+        "Gap": f"{gap:.2f}",
+        "Generation": generation_method,
+        "Policy": policy_name,
+        "Final regret": (
+            f"{final_regret_array.mean():.1f} "
+            f"[{regret_ci_low:.1f}, {regret_ci_high:.1f}]"
+        ),
+        "Final reward": f"{final_reward_array.mean():.1f} +/- {final_reward_array.std(ddof=1):.1f}",
+        "Best-arm share": f"{final_share_array.mean():.1%}",
+        "Late-stage share": f"{late_stage_share_array.mean():.1%}",
+        "Identify best": (
+            f"{identified_best_array.mean():.1%} "
+            f"[{identification_ci_low:.1%}, {identification_ci_high:.1%}]"
+        ),
+    }
+
+    return {
+        "scenario_index": scenario_index,
+        "n_arms": n_arms,
+        "difficulty_name": difficulty_name,
+        "gap": gap,
+        "generation_method": generation_method,
+        "probs": probs,
+        "best_arm": best_arm,
+        "policy_index": policy_index,
+        "policy_name": policy_name,
+        "policy_result": policy_result,
+        "summary_row": summary_row,
+    }
+```
+
+## Run The Sweep
+
+```{python}
+#| label: run-many-arm-sweep
+scenario_results: dict[tuple[int, str, str], dict[str, object]] = {}
+summary_rows: list[dict[str, object]] = []
+
+scenario_specs = [
+    (n_arms, difficulty_name, gap, generation_method)
+    for n_arms in ARM_COUNTS
+    for difficulty_name, gap in DIFFICULTIES.items()
+    for generation_method in GENERATION_METHODS
+]
+
+pair_results = Parallel(n_jobs=JOBLIB_N_JOBS, prefer="processes")(
+    delayed(evaluate_scenario_policy)(
+        scenario_index=scenario_index,
+        n_arms=n_arms,
+        difficulty_name=difficulty_name,
+        gap=gap,
+        generation_method=generation_method,
+        policy_index=policy_index,
+        policy_name=policy_name,
+        policy_factory=factory,
+    )
+    for scenario_index, (n_arms, difficulty_name, gap, generation_method) in enumerate(
+        scenario_specs
+    )
+    for policy_index, (policy_name, factory) in enumerate(POLICY_FACTORIES.items())
+)
+
+pair_results.sort(
+    key=lambda result: (
+        int(result["n_arms"]),
+        str(result["difficulty_name"]),
+        str(result["generation_method"]),
+        int(result["policy_index"]),
+    )
+)
+
+for pair_result in pair_results:
+    scenario_key = (
+        pair_result["n_arms"],
+        pair_result["difficulty_name"],
+        pair_result["generation_method"],
+    )
+    if scenario_key not in scenario_results:
+        scenario_results[scenario_key] = {
+            "n_arms": pair_result["n_arms"],
+            "difficulty_name": pair_result["difficulty_name"],
+            "gap": pair_result["gap"],
+            "generation_method": pair_result["generation_method"],
+            "probs": pair_result["probs"],
+            "best_arm": pair_result["best_arm"],
+            "policies": {},
+        }
+
+    scenario_results[scenario_key]["policies"][pair_result["policy_name"]] = pair_result[
+        "policy_result"
+    ]
+    summary_rows.append(pair_result["summary_row"])
+
+print(
+    f"Ran {len(ARM_COUNTS)} arm counts x {len(DIFFICULTIES)} difficulties x "
+    f"{len(GENERATION_METHODS)} generation methods x {len(POLICY_FACTORIES)} policies x "
+    f"{N_TRIALS} trials x {N_STEPS} steps."
+)
+```
+
+## Summary Metrics
+
+```{python}
+#| label: summary-table
+summary_columns = [
+    ("Arms", "Arms"),
+    ("Difficulty", "Difficulty"),
+    ("Gap", "Gap"),
+    ("Generation", "Generation"),
+    ("Policy", "Policy"),
+    ("Final regret", "Mean final pseudo-regret with 95% CI"),
+    ("Final reward", "Mean final reward +/- sd"),
+    ("Best-arm share", "Mean cumulative best-arm share"),
+    ("Late-stage share", "Mean best-arm share in final 200 steps"),
+    ("Identify best", "P(final estimated-best arm is optimal) with 95% CI"),
+]
+display(Markdown(markdown_table(summary_rows, summary_columns)))
+```
+
+## Winner By Scenario
+
+Lower pseudo-regret answers the online learning question: how expensive was learning while
+traffic was being allocated? Best-arm identification answers a different final inference
+question. These can disagree, especially when there are many near-best arms.
+
+```{python}
+#| label: scenario-winners
+winners_rows: list[dict[str, object]] = []
+thompson_gap_rows: list[dict[str, object]] = []
+
+for scenario_key, scenario_result in scenario_results.items():
+    policies = scenario_result["policies"]
+    best_regret_policy, best_regret_metrics = min(
+        policies.items(), key=lambda item: item[1]["mean_final_regret"]
+    )
+    best_identification_policy, best_identification_metrics = max(
+        policies.items(), key=lambda item: item[1]["best_arm_identification_rate"]
+    )
+
+    non_random = {
+        policy_name: policy_result
+        for policy_name, policy_result in policies.items()
+        if policy_name not in {"Random", "Thompson"}
+    }
+    next_best_policy, next_best_metrics = min(
+        non_random.items(),
+        key=lambda item: item[1]["mean_final_regret"],
+    )
+    thompson_metrics = policies["Thompson"]
+    thompson_edge = (
+        next_best_metrics["mean_final_regret"] - thompson_metrics["mean_final_regret"]
+    )
+
+    winners_rows.append(
+        {
+            "Arms": str(scenario_result["n_arms"]),
+            "Difficulty": scenario_result["difficulty_name"],
+            "Generation": scenario_result["generation_method"],
+            "Lowest regret": (
+                f"{best_regret_policy} ({best_regret_metrics['mean_final_regret']:.1f})"
+            ),
+            "Best identification": (
+                f"{best_identification_policy} "
+                f"({best_identification_metrics['best_arm_identification_rate']:.1%})"
+            ),
+        }
+    )
+    thompson_gap_rows.append(
+        {
+            "Arms": int(scenario_result["n_arms"]),
+            "Difficulty": scenario_result["difficulty_name"],
+            "Gap": float(scenario_result["gap"]),
+            "Generation": scenario_result["generation_method"],
+            "Thompson regret": thompson_metrics["mean_final_regret"],
+            "Next-best policy": next_best_policy,
+            "Next-best regret": next_best_metrics["mean_final_regret"],
+            "Thompson edge": thompson_edge,
+        }
+    )
+
+winners_columns = [
+    ("Arms", "Arms"),
+    ("Difficulty", "Difficulty"),
+    ("Generation", "Generation"),
+    ("Lowest regret", "Lowest mean final pseudo-regret"),
+    ("Best identification", "Highest best-arm identification rate"),
+]
+display(Markdown(markdown_table(winners_rows, winners_columns)))
+```
+
+```{python}
+#| label: write-machine-readable-artifacts
+if RUN_DIR:
+    run_dir = RUN_PATH
+    run_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(summary_rows).to_csv(run_dir / "many_arm_summary.csv", index=False)
+    pd.DataFrame(winners_rows).to_csv(run_dir / "many_arm_winners.csv", index=False)
+    pd.DataFrame(thompson_gap_rows).to_csv(run_dir / "many_arm_thompson_gap.csv", index=False)
+```
+
+## Figure 1: Final Pseudo-Regret Versus Number Of Arms
+
+```{python}
+#| label: fig-final-regret-vs-arms
+#| fig-cap: Mean final pseudo-regret by arm count. Error bars show 95% confidence intervals for the mean across trials.
+for generation_method in GENERATION_METHODS:
+    fig, axes = plt.subplots(1, len(DIFFICULTIES), figsize=(14, 3.5), sharey=False)
+    axes = np.atleast_1d(axes)
+    for ax, (difficulty_name, gap) in zip(axes, DIFFICULTIES.items()):
+        scenario_subset = [
+            scenario_result
+            for scenario_key, scenario_result in scenario_results.items()
+            if scenario_result["difficulty_name"] == difficulty_name
+            and scenario_result["generation_method"] == generation_method
+        ]
+        scenario_subset = sorted(scenario_subset, key=lambda result: result["n_arms"])
+        x_values = np.array([scenario["n_arms"] for scenario in scenario_subset])
+
+        for policy_name in PLOT_POLICIES_NO_RANDOM:
+            means = []
+            ci_half_widths = []
+            for scenario in scenario_subset:
+                policy_result = scenario["policies"][policy_name]
+                means.append(policy_result["mean_final_regret"])
+                ci_half_widths.append(
+                    policy_result["mean_final_regret"] - policy_result["final_regret_ci_low"]
+                )
+            ax.errorbar(
+                x_values,
+                means,
+                yerr=ci_half_widths,
+                marker="o",
+                capsize=4,
+                linewidth=2,
+                label=policy_name,
+                color=POLICY_COLORS[policy_name],
+            )
+
+        ax.set_title(f"{difficulty_name} gap={gap:.2f}")
+        ax.set_xlabel("Number of arms")
+        ax.set_ylabel("Final cumulative pseudo-regret")
+        ax.grid(alpha=0.25)
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.suptitle(f"Final pseudo-regret: {generation_method}")
+    fig.legend(
+        handles,
+        labels,
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.02),
+        ncol=3,
+        frameon=False,
+    )
+    fig.tight_layout(rect=(0, 0.10, 1, 0.90))
+    plt.show()
+```
+
+## Figure 2: Final Best-Arm Identification Versus Number Of Arms
+
+```{python}
+#| label: fig-identification-vs-arms
+#| fig-cap: Final best-arm identification rate by arm count. Error bars show 95% confidence intervals for the mean across trials.
+for generation_method in GENERATION_METHODS:
+    fig, axes = plt.subplots(1, len(DIFFICULTIES), figsize=(14, 3.5), sharey=True)
+    axes = np.atleast_1d(axes)
+    for ax, (difficulty_name, gap) in zip(axes, DIFFICULTIES.items()):
+        scenario_subset = [
+            scenario_result
+            for scenario_key, scenario_result in scenario_results.items()
+            if scenario_result["difficulty_name"] == difficulty_name
+            and scenario_result["generation_method"] == generation_method
+        ]
+        scenario_subset = sorted(scenario_subset, key=lambda result: result["n_arms"])
+        x_values = np.array([scenario["n_arms"] for scenario in scenario_subset])
+
+        for policy_name in POLICY_FACTORIES:
+            means = []
+            ci_half_widths = []
+            for scenario in scenario_subset:
+                policy_result = scenario["policies"][policy_name]
+                means.append(policy_result["best_arm_identification_rate"])
+                ci_half_widths.append(
+                    policy_result["identification_ci_high"]
+                    - policy_result["best_arm_identification_rate"]
+                )
+            ax.errorbar(
+                x_values,
+                means,
+                yerr=ci_half_widths,
+                marker="o",
+                capsize=4,
+                linewidth=2,
+                label=policy_name,
+                color=POLICY_COLORS[policy_name],
+            )
+
+        ax.set_title(f"{difficulty_name} gap={gap:.2f}")
+        ax.set_xlabel("Number of arms")
+        ax.set_ylabel("P(final estimated-best is optimal)")
+        ax.set_ylim(0.0, 1.05)
+        ax.grid(alpha=0.25)
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.suptitle(f"Final identification: {generation_method}")
+    fig.legend(
+        handles,
+        labels,
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.02),
+        ncol=4,
+        frameon=False,
+    )
+    fig.tight_layout(rect=(0, 0.10, 1, 0.90))
+    plt.show()
+```
+
+## Figure 3: Best-Arm Allocation Share In Representative Scenarios
+
+```{python}
+#| label: fig-best-arm-share-representative
+#| fig-cap: Mean cumulative best-arm allocation share over time for representative 20-arm scenarios.
+representative_keys = [
+    (20, "Easy", "single_winner_ladder"),
+    (20, "Hard", "single_winner_ladder"),
+    (20, "Easy", "crowded_top"),
+    (20, "Hard", "crowded_top"),
+]
+fig, axes = plt.subplots(2, 2, figsize=(11, 7), sharex=True, sharey=True)
+axes = np.atleast_1d(axes).ravel()
+steps = np.arange(1, N_STEPS + 1)
+
+for ax, scenario_key in zip(axes, representative_keys):
+    scenario_result = scenario_results[scenario_key]
+    for policy_name, policy_result in scenario_result["policies"].items():
+        color = POLICY_COLORS[policy_name]
+        ax.plot(steps, policy_result["mean_share"], label=policy_name, color=color)
+        ax.fill_between(
+            steps,
+            policy_result["share_p10"],
+            policy_result["share_p90"],
+            color=color,
+            alpha=0.12,
+        )
+    ax.set_title(
+        f"{scenario_key[1]}, {scenario_key[2].replace('_', ' ')}"
+    )
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Best-arm share")
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(alpha=0.25)
+
+handles, labels = axes[0].get_legend_handles_labels()
+fig.legend(
+    handles,
+    labels,
+    loc="lower center",
+    bbox_to_anchor=(0.5, -0.01),
+    ncol=4,
+    frameon=False,
+)
+fig.tight_layout(rect=(0, 0.07, 1, 1.0))
+plt.show()
+```
+
+## Figure 4: Thompson Sampling Edge
+
+```{python}
+#| label: fig-thompson-edge
+#| fig-cap: Difference between the next-best non-random policy's final pseudo-regret and Thompson sampling's final pseudo-regret. Positive values mean Thompson had lower regret.
+thompson_gap = pd.DataFrame(thompson_gap_rows)
+fig, axes = plt.subplots(1, len(GENERATION_METHODS), figsize=(12, 4), sharey=True)
+axes = np.atleast_1d(axes)
+
+for ax, generation_method in zip(axes, GENERATION_METHODS):
+    subset = thompson_gap[thompson_gap["Generation"] == generation_method]
+    for difficulty_name in DIFFICULTIES:
+        difficulty_subset = subset[subset["Difficulty"] == difficulty_name].sort_values("Arms")
+        ax.plot(
+            difficulty_subset["Arms"],
+            difficulty_subset["Thompson edge"],
+            marker="o",
+            linewidth=2,
+            label=difficulty_name,
+        )
+    ax.axhline(0.0, color="black", linewidth=1, alpha=0.5)
+    ax.set_title(generation_method.replace("_", " "))
+    ax.set_xlabel("Number of arms")
+    ax.set_ylabel("Next-best regret - Thompson regret")
+    ax.grid(alpha=0.25)
+    ax.legend(frameon=False)
+
+fig.tight_layout()
+plt.show()
+```
+
 ## Discussion
 
-**Referring to my original prediction**
+This sweep isolates the arm-count question by holding the horizon fixed at 2,000 pulls and
+using the same policy set across every scenario. I used 300 trials rather than a larger grid
+because the goal here is learning signal, not a benchmark leaderboard. The design still has
+enough replication to show uncertainty intervals and avoid treating one noisy run as evidence.
 
+The two generation methods matter. The single-winner ladder asks what happens when more bad
+options are added beneath a clearly better arm. The crowded-top method asks the harder
+question: what happens when the policy must distinguish among several plausible near-winners?
+Those are different operational problems even when they have the same number of arms and the
+same best-versus-second-best gap.
 
-**Why does this matter?**
+Pseudo-regret remains the primary metric because it measures the opportunity cost of learning
+online. Best-arm identification remains useful, but it is not the same objective. Random
+allocation can sometimes identify the best arm well because it samples broadly, but that does
+not mean it was an efficient online policy.
+
+## Conclusion
+
+My original intuition was mostly right: Thompson sampling is still the strongest default in
+this experiment. It had the lowest final pseudo-regret in 20 of the 24 scenarios, and it was
+especially strong when the gap was easy or medium. That is the result I would want to remember
+in a practical setting: if I have to pick one general-purpose policy for Bernoulli bandits,
+Thompson sampling is hard to beat.
+
+The useful surprise is where that intuition breaks. In the hard 10-arm and 20-arm settings,
+DecayingEpsilon produced lower pseudo-regret than vanilla Thompson sampling. That does not mean
+DecayingEpsilon is a better policy overall. It means that, under a fixed horizon, many
+near-tied arms can make the value of continued exploration pretty weak. Thompson sampling keeps
+probability-matching because the posterior still says several arms could plausibly be best.
+That is statistically honest, but it can spend traffic resolving differences that may not pay
+back by step 2,000. DecayingEpsilon is blunter: it explores early, then increasingly commits to
+the current empirical winner. In these hard many-arm settings, that bluntness sometimes wins on
+regret.
+
+This is the piece that made the experiment click for me: "more arms" is not just "the same
+bandit problem, but bigger." More arms create more ways for the policy to spend traffic on
+plausible alternatives, and crowded near-winners make final identification fragile. A policy can
+be better at learning the truth and still be worse for the online objective if the experiment
+ends before that extra learning pays back.
+
+::: callout-important
+## Thompson sampling is the best default here, but it is not automatically horizon-optimal when many arms are close together.
+:::
+
+## What I Learned
+
+The most important distinction is between learning efficiently and proving the best arm. These
+are related, but they are not the same objective. Pseudo-regret asks, "How expensive was the
+learning process while users were being allocated?" Best-arm identification asks, "Did the
+policy finish with the right answer?" Random allocation can look respectable on identification
+because it samples broadly, while still being a terrible online-learning policy because it wastes
+traffic the whole way.
+
+The second lesson is that exploration should be judged against the remaining horizon. Thompson
+sampling has a beautiful uncertainty-matching logic, but vanilla Thompson does not explicitly
+ask whether the information it is buying can still pay back before the experiment ends. That is
+why the hard 10-arm and 20-arm cases are so interesting: they suggest a natural next step, not a
+failure of Thompson sampling.
+
+## Next Experiment
+
+The next policy I would test is a tempered or annealed version of Thompson sampling. The idea is
+to keep Thompson's useful uncertainty-aware exploration early, then gradually sharpen the
+posterior samples or mix in more posterior-mean greedy decisions late. In plain terms: explore
+like Thompson when there is still time to learn, then commit more aggressively when the remaining
+horizon is short.
+
+That would directly test the lesson from this sweep. If tempered Thompson closes the hard
+many-arm gap against DecayingEpsilon while keeping Thompson's advantage in easier regimes, then
+the real conclusion is not "use DecayingEpsilon instead." It is "vanilla Thompson is a strong
+baseline, and horizon-aware Thompson may be the better next policy."
