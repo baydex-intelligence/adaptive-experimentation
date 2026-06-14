@@ -46,9 +46,10 @@ experiments:
     - bandit_policy_comparison
     - difficulty_gap_sweep
     - horizon_sweep
+    - many_arm_sweep
   next_candidate:
-    name: many_arm_sweep
-    question: "What changes when there are more arms?"
+    name: delayed_feedback_simulation
+    question: "How does delayed reward feedback change regret, allocation, and best-arm learning?"
   deferred_or_removed:
     - epsilon_sensitivity
 
@@ -64,9 +65,11 @@ artifacts:
     - "reports/peeking-breaks-ab-tests.md"
     - "reports/bandit-policy-comparison.md"
     - "reports/production-caveats.md"
+    - "experiments/when_you_add_arms.html"
   fixed_output_paths:
     - "reports/peeking_fpr.png"
     - "reports/bandit_comparison_regret.png"
+    - "experiments/when_you_add_arms.html"
 
 protected_actions:
   - "Do not overwrite tracked report PNGs without an explicit run plan."
